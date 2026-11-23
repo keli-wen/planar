@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+set -eu
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+echo "[planar pre-push] Running full local verification gate (npm run verify)..."
+npm run verify

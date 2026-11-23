@@ -1,0 +1,54 @@
+name: New Harness or API Provider Adapter
+description: Request or implement a new coding-agent harness ingestor or LLM API provider
+title: "[Adapter] "
+labels: ["enhancement", "harness"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## New Harness Ingestor / API Provider
+        Follow `.agents/skills/planar-dev/references/add-harness-or-provider.md`. All harness ingestors MUST remain strictly **read-only** on source transcript logs.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Adapter Kind
+      options:
+        - Coding-Agent Harness Ingestor (Review Tier T2)
+        - OpenAI-Compatible Summarizer API Provider (Review Tier T1)
+        - Local CLI Summarizer Backend (Review Tier T2)
+    validations:
+      required: true
+
+  - type: input
+    id: adapter-name
+    attributes:
+      label: Harness / Provider Name
+      placeholder: e.g. OpenCode, Cursor CLI, Windsurf, Fireworks AI
+    validations:
+      required: true
+
+  - type: textarea
+    id: log-format
+    attributes:
+      label: Transcript Location, Format & Resume Command (or API Endpoint)
+      description: Provide sanitized schema examples only — never paste real user transcripts or API keys!
+      placeholder: |
+        - Default log root: `~/.<tool>/sessions/**/*.jsonl`
+        - Timestamp / role / token usage JSON fields (sanitized synthetic example):
+        - CLI resume command (if any): `<tool> resume <session_id>`
+        - Or API Base URL + default lightweight model + env var name:
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification Checklist
+      value: |
+        - [ ] Strictly read-only incremental scan via `stream_jsonl_lines` + `decide_scan`
+        - [ ] Tool outputs & `[PLANAR_INTERNAL_DIGEST]` stripped cleanly
+        - [ ] Offline `TempDir` unit tests for full scan, incremental append, and token accounting
+        - [ ] `contexts/project/architecture.md` updated & `npm run pre-pr` passes
+    validations:
+      required: true

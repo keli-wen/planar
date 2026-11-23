@@ -1,0 +1,23 @@
+#!/usr/bin/env sh
+set -eu
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# 1. Always run fast clean-room privacy, link, context-map, version & symlink checks.
+node ./scripts/check-hygiene.mjs
+
+STAGED="$(git diff --cached --name-only --diff-filter=ACM)"
+if [ -z "$STAGED" ]; then
+  exit 0
+fi
+
+# 2. If UI or Node scripts are staged, run Biome + node --check.
+if printf '%s\n' "$STAGED" | grep -Eq '^(ui/|scripts/)'; then
+  npm run lint:ui
+fi
+
+# 3. If Rust source files are staged, run rustfmt check.
+if printf '%s\n' "$STAGED" | grep -Eq '\.rs$'; then
+  cargo fmt --all -- --check
+fi

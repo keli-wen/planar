@@ -1,0 +1,36 @@
+{
+  "name": "@keli-wen/planar",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "description": "A shared map of the work you do with agents — quietly reads local agent sessions into lines of work over time for planning, reflection, and personal agent context.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Keli Wen",
+  "bin": {
+    "planar": "./scripts/preview.mjs"
+  },
+  "scripts": {
+    "preview": "node ./scripts/preview.mjs",
+    "app:dev": "tauri dev",
+    "app:build": "tauri build --bundles app",
+    "app:install": "npm run app:build && rm -rf /Applications/Planar.app && cp -R target/release/bundle/macos/Planar.app /Applications/Planar.app && codesign --force --deep -s - /Applications/Planar.app",
+    "app:open": "open -a /Applications/Planar.app",
+    "hooks:install": "git config core.hooksPath .githooks",
+    "check:syntax": "node --check ui/app.js && node --check scripts/preview.mjs && node --check scripts/check-hygiene.mjs",
+    "check:hygiene": "node ./scripts/check-hygiene.mjs",
+    "lint:ui": "biome lint ui scripts && npm run check:syntax",
+    "lint:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings",
+    "lint": "npm run lint:ui && npm run lint:rust",
+    "test": "cargo test --workspace",
+    "test:hooks": "python3 -m unittest discover -s scripts/hooks -p 'test_*.py' -v",
+    "verify": "npm run lint && npm run check:hygiene && npm run test && npm run test:hooks",
+    "pre-pr": "npm run verify && python3 ./scripts/hooks/pre_tool_use_pr_guard.py --write-marker"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.7",
+    "@tauri-apps/cli": "2.12.4"
+  }
+}

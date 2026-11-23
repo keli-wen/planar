@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Planar</title>
+  <link rel="icon" type="image/svg+xml" href="../assets/icon.svg?v=0.4.6" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css?v=0.4.6" />
+</head>
+<body data-palette="#A43D74,#2E8540,#784BA8,#B84A32,#008778,#2656C4">
+  <div id="app-shell" class="app-shell">
+    <!-- Rendered dynamically by app.js -->
+  </div>
+  <div id="viewport-scroll-veil" class="viewport-scroll-veil">
+    <button type="button" class="scroll-more-cue is-viewport-cue" data-action="scroll-main-more" aria-label="Scroll down" tabindex="-1">
+      <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+        <path d="M3.6 5.4L7 8.8l3.4-3.4" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+    </button>
+  </div>
+  <div id="popover-layer" class="popover-layer" hidden></div>
+  <div id="timeline-tooltip" class="timeline-tooltip" hidden></div>
+  <script type="module" src="./app.js?v=0.4.6"></script>
+</body>
+</html>

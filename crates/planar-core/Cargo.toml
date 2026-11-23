@@ -1,0 +1,30 @@
+[package]
+name = "planar-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Core local-first engine for Planar — a shared map of the work you do with agents"
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+futures-core.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower.workspace = true

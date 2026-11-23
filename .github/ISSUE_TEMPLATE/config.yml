@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Read Context Map (contexts/CONTEXT_MAP.md)
+    url: https://github.com/keli-wen/planar/blob/master/contexts/CONTEXT_MAP.md
+    about: Browse architecture, slicing specs, UI contract, and release policy before opening an issue.
+  - name: Review Policy (REVIEW.md)
+    url: https://github.com/keli-wen/planar/blob/master/REVIEW.md
+    about: Understand Review Tiers (T0-T3) and acceptance gates for Issues and PRs.

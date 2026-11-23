@@ -1,0 +1,52 @@
+name: Context or Agent Workflow Update
+description: Update contexts/ or evolve skills, hooks, and review policies
+title: "[Context] "
+labels: ["documentation", "context"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Context / Agent Workflow Update
+        Check `contexts/CONTEXT_MAP.md` placement rules before proposing new files.
+
+  - type: dropdown
+    id: review-tier
+    attributes:
+      label: Suggested Review Tier (per REVIEW.md)
+      options:
+        - T0 — Pure docs / context clarification
+        - T1 — Skill reference or template refinement
+        - T2 — Hooks / CI / Review policy / Release gate change
+        - T3 — Cross-cutting Architecture RFC / Spec
+    validations:
+      required: true
+
+  - type: textarea
+    id: target-files
+    attributes:
+      label: Target Files
+      placeholder: |
+        - `contexts/...`
+        - `.agents/skills/planar-dev/...`
+        - `REVIEW.md` / `.githooks/...`
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Change Summary & Rationale
+      description: What knowledge gap, drift, or workflow friction does this resolve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification Plan
+      value: |
+        - [ ] Registered in `contexts/CONTEXT_MAP.md` (if new context file)
+        - [ ] `npm run check:hygiene` passes (0 broken links, 0 privacy hits)
+        - [ ] `npm run test:hooks` passes (if hooks touched)
+    validations:
+      required: true

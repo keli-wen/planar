@@ -1,0 +1,94 @@
+name: Bug Report
+description: Report a bug, regression, parser mismatch, or invariant violation (human & agent friendly)
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Bug Report
+        Fill in the context fields below so a maintainer or clean-session coding agent can reproduce, fix, and verify the issue without guessing.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected Surface
+      options:
+        - planar-core (ingestors / SQLite / burst math / slicer / MCP / HTTP)
+        - planar-cli (CLI commands & output)
+        - src-tauri (macOS Planar.app / menu-bar tray)
+        - ui (zero-fork HTML/CSS/JS frontend)
+        - skills/planar (Agent Skill)
+        - Tooling / Hooks / CI
+        - Multiple / Unknown
+    validations:
+      required: true
+
+  - type: dropdown
+    id: review-tier
+    attributes:
+      label: Suggested Review Tier (per REVIEW.md)
+      description: Select the highest tier matching the fix surface.
+      options:
+        - T1 — Standard Scoped Fix (UI/CLI/render/pricing)
+        - T2 — Core Invariant / Schema / Ingestor / MCP / Tauri / Hooks
+        - T0 — Trivial / Docs only
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem Description
+      description: Clear, concise description of the bug and why it matters.
+      placeholder: What went wrong? Include any invariant violated (e.g. active time, Sync vs Regroup, pruned digest lock).
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction Steps & Environment
+      description: Exact steps/commands to reproduce (sanitize any personal paths or transcript payloads!).
+      placeholder: |
+        - OS / Harness version: macOS ..., Claude Code / Codex / Antigravity / DSH
+        - Planar version / commit:
+        1. Run `...`
+        2. Observe `...`
+        3. Expected `...`
+    validations:
+      required: true
+
+  - type: textarea
+    id: source-context
+    attributes:
+      label: Source Context & Entry Points
+      description: Which `contexts/` docs, source files, or related issues/PRs should the fixer read first?
+      placeholder: |
+        - `contexts/project/architecture.md`
+        - `crates/planar-core/src/...`
+    validations:
+      required: true
+
+  - type: dropdown
+    id: context-action
+    attributes:
+      label: Context Action
+      description: Does fixing this bug require updating `contexts/`?
+      options:
+        - No context impact
+        - Update existing context
+        - Create new context doc
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification Plan
+      description: What regression test or manual check proves the bug is fixed?
+      placeholder: |
+        - Add offline unit test in `crates/planar-core/src/...`
+        - Run `npm run verify`
+    validations:
+      required: true

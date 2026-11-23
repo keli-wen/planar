@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <defs>
+    <clipPath id="planar-squircle">
+      <rect x="0" y="0" width="24" height="24" rx="4" />
+    </clipPath>
+  </defs>
+  <g clip-path="url(#planar-squircle)">
+    <!-- Bottom-right vivid rose-magenta plane -->
+    <rect x="0" y="0" width="24" height="24" fill="#E63B7A" />
+    <!-- Top-left luminous warm amber-orange plane (slight 0.15px overlap under middle lane prevents subpixel seam) -->
+    <path d="M 0 0 H 24 V 4.15 H 16 A 8 8 0 0 1 8 12.15 H 0 Z" fill="#F27D16" />
+    <!-- Middle electric royal-ultramarine lane: R=8 quarter-circle arc on top, 45° chamfer on bottom -->
+    <path d="M 0 12 H 8 A 8 8 0 0 0 16 4 H 24 V 12 H 16 L 8 20 H 0 Z" fill="#2945F5" />
+  </g>
+</svg>

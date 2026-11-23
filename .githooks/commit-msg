@@ -1,0 +1,34 @@
+#!/usr/bin/env sh
+set -eu
+
+MSG_FILE="${1:-}"
+if [ -z "$MSG_FILE" ] || [ ! -f "$MSG_FILE" ]; then
+  echo "commit-msg hook: missing commit message file argument" >&2
+  exit 1
+fi
+
+SUBJECT="$(grep -vE '^\s*(#|$)' "$MSG_FILE" | head -n 1 || true)"
+
+# Allow standard Git-generated merge/revert/fixup/squash subjects.
+if printf '%s\n' "$SUBJECT" | grep -Eq '^(Merge |Revert |fixup! |squash! )'; then
+  exit 0
+fi
+
+# Enforce Planar commit prefix grammar (see contexts/engineering/version-control-and-release.md).
+if printf '%s\n' "$SUBJECT" | grep -Eq '^(ctx|core|cli|app|ui|skill|feat|fix|refactor|test|docs|chore|ci|release)(\([a-z0-9,._/-]+\))?!?: .+'; then
+  exit 0
+fi
+
+cat >&2 <<EOF
+Invalid commit subject: "$SUBJECT"
+
+Expected format: <prefix>[(scope)]: <summary>
+Allowed prefixes: ctx, core, cli, app, ui, skill, feat, fix, refactor, test, docs, chore, ci, release
+Examples:
+  core(burst): preserve explicit tool spans across idle gaps
+  ui: render open follow-ups in inline recap card
+  ctx: document zero-fork vanilla UI contract
+
+See contexts/engineering/version-control-and-release.md for details.
+EOF
+exit 1

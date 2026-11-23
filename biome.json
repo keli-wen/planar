@@ -1,0 +1,27 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.7/schema.json",
+  "formatter": {
+    "enabled": false
+  },
+  "files": {
+    "includes": ["ui/**/*.js", "ui/**/*.css", "scripts/**/*.mjs"]
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "correctness": {
+        "noUnusedVariables": "error",
+        "noUndeclaredVariables": "error",
+        "noUnreachable": "error"
+      },
+      "suspicious": {
+        "noDuplicateObjectKeys": "error",
+        "noUnknownAtRules": "off"
+      },
+      "style": {
+        "noDescendingSpecificity": "off"
+      }
+    }
+  }
+}

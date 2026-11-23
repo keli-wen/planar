@@ -1,0 +1,106 @@
+name: Feature Request
+description: Propose a new capability, workflow improvement, or architectural RFC (contexts-first)
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Feature Request
+        Write this issue as a self-contained handoff spec. For **T3** architectural proposals, the RFC / `contexts/` design spec must pass Design Gate before implementation (see `REVIEW.md`).
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Target Surface
+      options:
+        - planar-core (ingestors / SQLite / slicer / processor / MCP / HTTP)
+        - planar-cli (CLI subcommands)
+        - src-tauri (macOS desktop / menu-bar shell)
+        - ui (zero-fork vanilla frontend)
+        - skills/planar (end-user Agent Skill)
+        - Multiple surfaces
+    validations:
+      required: true
+
+  - type: dropdown
+    id: review-tier
+    attributes:
+      label: Suggested Review Tier (per REVIEW.md)
+      options:
+        - T1 — Standard Scoped Feature
+        - T2 — Core Invariant / Schema / Protocol / Release
+        - T3 — Architectural / Multi-Crate RFC (requires Design Gate)
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation & User Workflow
+      description: What real multi-session workflow pain does this solve?
+      placeholder: |
+        - Pain point:
+        - Target scenario (e.g. evening wrap-up, next-morning resume, cross-harness planning):
+        - Out of scope (what this explicitly will NOT do):
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Behavior & Requirements
+      description: Concrete functional requirements and non-negotiable invariants to uphold.
+      placeholder: |
+        1. ...
+        2. ...
+        Invariants to preserve: read-only harness logs, pinned Line immutability, zero-fork `./ui`, ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: source-context
+    attributes:
+      label: Source Context (Required Reading)
+      description: Which `contexts/` docs, skills, or files must a clean-session agent read before starting?
+      placeholder: |
+        - `contexts/project/overview.md`
+        - `contexts/project/design.md`
+        - `contexts/project/architecture.md`
+    validations:
+      required: true
+
+  - type: dropdown
+    id: context-action
+    attributes:
+      label: Context Action
+      options:
+        - Update existing context
+        - Create new context doc
+        - Read existing context only
+        - No context impact
+    validations:
+      required: true
+
+  - type: textarea
+    id: target-context
+    attributes:
+      label: Target Context / Durable Output
+      description: Which `contexts/` file(s) will be created or updated upon completion (or `N/A` with reason)?
+      placeholder: |
+        - `contexts/project/architecture.md`
+        - `contexts/engineering/<topic>.md`
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification & Done Criteria
+      description: Exact tests, lint gates, and smoke checks required before closing.
+      placeholder: |
+        - [ ] Unit / integration tests added (`cargo test --workspace`)
+        - [ ] `npm run pre-pr` passes
+        - [ ] Context docs updated and registered in `contexts/CONTEXT_MAP.md`
+    validations:
+      required: true

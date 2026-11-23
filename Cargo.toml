@@ -1,0 +1,55 @@
+[workspace]
+members = ["crates/planar-core", "crates/planar-cli", "src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0-alpha.0"
+edition = "2024"
+license = "MIT"
+authors = ["Keli Wen"]
+repository = "https://github.com/keli-wen/planar"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+dbg_macro = "deny"
+todo = "warn"
+rc_buffer = "warn"
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+struct_excessive_bools = "allow"
+
+[workspace.dependencies]
+anyhow = "1"
+axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+futures-core = "0.3"
+reqwest = { version = "0.13", features = ["json"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "process", "signal", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+walkdir = "2"
