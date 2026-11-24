@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -270,9 +271,37 @@ function checkSymlink(linkRel, targetRel) {
   }
 }
 
+function checkSvgXml(files) {
+  const svgFiles = files.filter(({ rel }) => rel.endsWith(".svg"));
+  if (svgFiles.length === 0) {
+    return;
+  }
+  const unescapedAmp = /&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/;
+  for (const { abs, rel } of svgFiles) {
+    const raw = readFileSync(abs, "utf8");
+    const stripped = raw.replace(/<!--[\s\S]*?-->/g, "").replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "");
+    if (unescapedAmp.test(stripped)) {
+      fail("svg", `${rel} contains an unescaped '&' (use '&amp;' for strict XML / GitHub SVG rendering)`);
+    }
+  }
+  const res = spawnSync(
+    "python3",
+    [
+      "-c",
+      "import sys, xml.etree.ElementTree as ET\nfor p in sys.argv[1:]:\n  ET.parse(p)\n",
+      ...svgFiles.map((f) => f.abs),
+    ],
+    { encoding: "utf8" },
+  );
+  if (res.error === undefined && res.status !== 0) {
+    fail("svg", `Strict XML validation failed: ${(res.stderr || res.stdout).trim()}`);
+  }
+}
+
 const allFiles = walkFiles(ROOT);
 checkPrivacy(allFiles);
 checkMarkdownLinks();
+checkSvgXml(allFiles);
 checkContextMapRegistration();
 checkVersionLockstep();
 checkSymlink("CLAUDE.md", "AGENTS.md");
