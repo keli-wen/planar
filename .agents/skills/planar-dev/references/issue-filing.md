@@ -6,12 +6,15 @@
 
 Templates live in `.github/ISSUE_TEMPLATE/`:
 
-| Template | Labels | When to use |
+| Template | Default Labels | When to use |
 | :--- | :--- | :--- |
 | `bug.yml` | `bug` | Unexpected behavior, crash, wrong active time, parser bug, UI regression |
 | `feature.yml` | `enhancement` | New user-facing capability or workflow improvement |
-| `harness-adapter.yml` | `enhancement`, `harness` | Support for a new coding-agent harness or LLM API provider |
-| `context-update.yml` | `documentation`, `context` | Updating `contexts/` or evolving agent workflows/skills |
+| `harness-adapter.yml` | `enhancement`, `area:harness` | Support for a new coding-agent harness or LLM API provider |
+| `context-update.yml` | `documentation`, `area:context` | Updating `contexts/` or evolving agent workflows/skills |
+
+Also attach the full agent-native label tuple defined in `CONTRIBUTING.md` (§4):
+`1 Type` (`bug`/`enhancement`/`perf`/`refactor`/`rfc`/`documentation`) + `1+ Surface` (`area:*`) + `1 Review Tier` (`tier:T0`–`tier:T3`) + `1 Dispatch State` (`agent:ready`/`agent:needs-spec`/`agent:human-gate`) + optional Priority (`P0`–`P2`).
 
 ## Step 2 — Populate Contexts-First Handoff Fields
 

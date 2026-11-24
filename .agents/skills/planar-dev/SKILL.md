@@ -51,6 +51,7 @@ Load only the reference needed for the task:
 
 - **Module & invariant lookup** → `references/architecture.md`
 - **Pre-PR check / review / `gh pr create`** → `references/verify-and-pre-pr.md`
+- **Post-review diff simplification (Occam's Razor)** → `references/simplify.md`
 - **Filing a contexts-first issue / `gh issue create`** → `references/issue-filing.md`
 - **Editing `./ui` or refreshing `assets/ui-*.png`** → `references/ui-zero-fork.md`
 - **Adding a harness adapter or LLM API provider** → `references/add-harness-or-provider.md`

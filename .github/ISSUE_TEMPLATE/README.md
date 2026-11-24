@@ -8,8 +8,10 @@ Planar uses **AI-friendly, contexts-first GitHub Issue Forms** so every issue do
 | :--- | :--- | :--- | :--- |
 | **Bug Report** | `bug.yml` | `bug` | `T1` (UI/CLI) or `T2` (Core/DB/Ingest/MCP) |
 | **Feature Request** | `feature.yml` | `enhancement` | `T1`–`T3` depending on blast radius |
-| **New Harness / Provider Adapter** | `harness-adapter.yml` | `enhancement`, `harness` | `T2` (new harness ingestor) or `T1` (OpenAI-compat API provider) |
-| **Context / Workflow Update** | `context-update.yml` | `documentation`, `context` | `T0` (docs/context) or `T2`/`T3` (hooks/RFC) |
+| **New Harness / Provider Adapter** | `harness-adapter.yml` | `enhancement`, `area:harness` | `T2` (new harness ingestor) or `T1` (OpenAI-compat API provider) |
+| **Context / Workflow Update** | `context-update.yml` | `documentation`, `area:context` | `T0` (docs/context) or `T2`/`T3` (hooks/RFC) |
+
+> See [`CONTRIBUTING.md` §4](../../CONTRIBUTING.md#4-issue--pr-labeling-guide-agent-native-taxonomy) for the full agent-native label taxonomy (`Type`, `area:*`, `tier:*`, `agent:*`, `P0`–`P2`).
 
 ## For Coding Agents Filing Issues via `gh issue create`
 

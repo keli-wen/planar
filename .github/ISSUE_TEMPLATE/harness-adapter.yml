@@ -1,7 +1,7 @@
 name: New Harness or API Provider Adapter
 description: Request or implement a new coding-agent harness ingestor or LLM API provider
 title: "[Adapter] "
-labels: ["enhancement", "harness"]
+labels: ["enhancement", "area:harness"]
 body:
   - type: markdown
     attributes:

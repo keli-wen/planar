@@ -1,7 +1,7 @@
 name: Context or Agent Workflow Update
 description: Update contexts/ or evolve skills, hooks, and review policies
 title: "[Context] "
-labels: ["documentation", "context"]
+labels: ["documentation", "area:context"]
 body:
   - type: markdown
     attributes:
