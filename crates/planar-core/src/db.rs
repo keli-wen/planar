@@ -3715,6 +3715,15 @@ mod tests {
         }
     }
 
+    /// Deterministic local mid-afternoon anchor so relative minute offsets in tests
+    /// never straddle local midnight regardless of wall-clock time or runner timezone.
+    fn fixed_local_midday() -> DateTime<Local> {
+        Local
+            .with_ymd_and_hms(2026, 11, 14, 15, 0, 0)
+            .single()
+            .unwrap()
+    }
+
     #[test]
     fn store_open_enforces_wal_and_busy_timeout_and_seeds_one_off() {
         let dir = TempDir::new().unwrap();
@@ -3913,7 +3922,7 @@ mod tests {
         let source_file = dir.path().join("rollout-pruned.jsonl");
         fs::write(&source_file, "{}\n").unwrap();
 
-        let now = Local::now();
+        let now = fixed_local_midday();
         let now_ms = now.timestamp_millis();
         let mut sess = sample_session("codex:pruned-1", now_ms, 5);
         sess.source_path = source_file.to_string_lossy().into_owned();
@@ -4074,7 +4083,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut store = Store::open(&dir.path().join("planar.db")).unwrap();
 
-        let now = Local::now();
+        let now = fixed_local_midday();
         let now_ms = now.timestamp_millis();
 
         // Summarized session later archived in Codex
@@ -4135,7 +4144,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut store = Store::open(&dir.path().join("planar.db")).unwrap();
 
-        let now = Local::now();
+        let now = fixed_local_midday();
         let now_ms = now.timestamp_millis();
 
         let s1 = sample_session("codex:sc-1", now_ms, 4);
@@ -4231,7 +4240,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut store = Store::open(&dir.path().join("planar.db")).unwrap();
 
-        let now = Local::now();
+        let now = fixed_local_midday();
         let now_ms = now.timestamp_millis();
 
         let planar_line_id = store
