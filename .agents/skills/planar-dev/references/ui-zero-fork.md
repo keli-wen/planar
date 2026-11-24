@@ -1,6 +1,6 @@
 # Reference: Zero-Fork Vanilla UI (`./ui`) Workflow
 
-> Source of truth: `contexts/engineering/ui-zero-fork.md` and `contexts/project/design.md §4`.
+> Source of truth: `DESIGN.md` (mandatory for all tokens, geometry & visual QA), `contexts/engineering/ui-zero-fork.md`, and `contexts/project/design.md §4`.
 
 ## Core Rules When Editing `./ui`
 

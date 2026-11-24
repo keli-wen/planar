@@ -147,6 +147,7 @@ function checkMarkdownLinks() {
     "README.md",
     "README.zh-CN.md",
     "AGENTS.md",
+    "DESIGN.md",
     "CONTRIBUTING.md",
     "REVIEW.md",
   ];

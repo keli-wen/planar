@@ -1,0 +1,381 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 588" width="1000" height="588" fill="none">
+  <defs>
+    <clipPath id="planar-clip-hero">
+      <rect x="0" y="0" width="24" height="24" rx="4.5"/>
+    </clipPath>
+    <clipPath id="planar-clip-mini">
+      <rect x="0" y="0" width="24" height="24" rx="4.5"/>
+    </clipPath>
+    <clipPath id="page-topbar-clip">
+      <path d="M 40 198 Q 40 184 54 184 H 946 Q 960 184 960 198 V 222 H 40 Z"/>
+    </clipPath>
+    <!-- Whisper-soft Notion editorial paper elevation for the single Hero Workspace Frame -->
+    <filter id="hero-shadow" x="-4%" y="-6%" width="108%" height="120%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#2F2E2A" flood-opacity="0.06"/>
+    </filter>
+  </defs>
+
+  <style>
+    .brand-title {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Display", "Helvetica Neue", sans-serif;
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.028em;
+      fill: #37352F;
+    }
+    .tagline {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Helvetica Neue", sans-serif;
+      font-size: 13.2px;
+      font-weight: 450;
+      fill: #787774;
+    }
+    .kicker {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", sans-serif;
+      font-size: 9.6px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      fill: #9B9A97;
+    }
+    .muted-note {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", sans-serif;
+      font-size: 11px;
+      font-weight: 450;
+      fill: #8C8A84;
+    }
+    .source-title {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", sans-serif;
+      font-size: 12.8px;
+      font-weight: 650;
+      fill: #37352F;
+    }
+    .source-maker {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", sans-serif;
+      font-size: 11px;
+      font-weight: 450;
+      fill: #8C8A84;
+    }
+    .tabular-num {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", sans-serif;
+      font-variant-numeric: tabular-nums;
+      font-size: 10.2px;
+      font-weight: 500;
+      fill: #9B9A97;
+    }
+    .line-label {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", sans-serif;
+      font-size: 11.8px;
+      font-weight: 550;
+      fill: #37352F;
+    }
+    .axis-label {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", sans-serif;
+      font-size: 10.2px;
+      font-weight: 500;
+      fill: #A4A39E;
+    }
+    .callout-title {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", sans-serif;
+      font-size: 12.2px;
+      font-weight: 650;
+      fill: #37352F;
+    }
+    .callout-body {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", sans-serif;
+      font-size: 10.9px;
+      font-weight: 450;
+      fill: #6B6A65;
+    }
+    .callout-keywords {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", sans-serif;
+      font-size: 10px;
+      font-weight: 550;
+      fill: #9B9A97;
+    }
+    .surface-title {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Display", sans-serif;
+      font-size: 13.8px;
+      font-weight: 700;
+      letter-spacing: -0.015em;
+      fill: #37352F;
+    }
+    .surface-tag {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", sans-serif;
+      font-size: 10.6px;
+      font-weight: 500;
+      fill: #9B9A97;
+    }
+    .surface-desc {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", sans-serif;
+      font-size: 11.1px;
+      font-weight: 450;
+      fill: #6B6A65;
+    }
+  </style>
+
+  <!-- Crisp Paper White Canvas -->
+  <rect x="0" y="0" width="1000" height="588" fill="#FFFFFF"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       ZONE 0: CLEAN BORDERLESS MASTHEAD
+       ═══════════════════════════════════════════════════════════════ -->
+  <g id="masthead">
+    
+      <g transform="translate(40.00,24.00) scale(1.08333)">
+        <g clip-path="url(#planar-clip-hero)">
+          <rect x="0" y="0" width="24" height="24" fill="#E63B7A"/>
+          <path d="M 0 0 H 24 V 4.15 H 16 A 8 8 0 0 1 8 12.15 H 0 Z" fill="#F27D16"/>
+          <path d="M 0 12 H 8 A 8 8 0 0 0 16 4 H 24 V 12 H 16 L 8 20 H 0 Z" fill="#2945F5"/>
+        </g>
+      </g>
+    
+    <text x="76" y="43.5" class="brand-title">Planar</text>
+    <line x1="146" y1="29" x2="146" y2="45" stroke="#E4E2DC" stroke-width="1.2"/>
+    <text x="159" y="42.5" class="tagline">A shared map of the work you do with agents.</text>
+
+    <!-- Whisper-quiet borderless status readout (flush right at X=960) -->
+    <circle cx="772" cy="38.5" r="3" fill="#2E8540"/>
+    <text x="960" y="42" text-anchor="end" class="muted-note">Local-first · Private · Open source</text>
+  </g>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       ZONE 1: TOP AGENT STRIP — 4 BORDERLESS SOFT PAPER CHIPS
+       ═══════════════════════════════════════════════════════════════ -->
+  <g id="your-agents">
+    <text x="40" y="82" class="kicker">YOUR AGENTS</text>
+    <text x="126" y="82" class="muted-note">·  Work as usual</text>
+
+    
+          <g>
+            <rect x="40" y="94" width="218" height="54" rx="11" fill="#F7F6F3"/>
+            <rect x="51" y="104" width="34" height="34" rx="8" fill="#FFFFFF"/>
+            <g transform="translate(58.5,111.5) scale(0.7917)">
+              <path fill-rule="evenodd" clip-rule="evenodd" d="M21.751 22.607c1.34 1.005 3.35.335 1.508-1.508C17.73 15.74 18.904 1 12.037 1 5.17 1 6.342 15.74.815 21.1c-2.01 2.009.167 2.511 1.507 1.506 5.192-3.517 4.857-9.714 9.715-9.714 4.857 0 4.522 6.197 9.714 9.715z" fill="#37352F"/>
+            </g>
+            <text x="96" y="118.5" class="source-title">Antigravity</text>
+            <text x="96" y="133.5" class="source-maker">Google</text>
+          </g>
+        
+          <g>
+            <rect x="274" y="94" width="218" height="54" rx="11" fill="#F7F6F3"/>
+            <rect x="285" y="104" width="34" height="34" rx="8" fill="#FFFFFF"/>
+            <g transform="translate(292.5,111.5) scale(0.7917)">
+              <path fill-rule="evenodd" clip-rule="evenodd" d="M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z" fill="#37352F"/>
+            </g>
+            <text x="330" y="118.5" class="source-title">Codex</text>
+            <text x="330" y="133.5" class="source-maker">OpenAI</text>
+          </g>
+        
+          <g>
+            <rect x="508" y="94" width="218" height="54" rx="11" fill="#F7F6F3"/>
+            <rect x="519" y="104" width="34" height="34" rx="8" fill="#FFFFFF"/>
+            <g transform="translate(526.5,111.5) scale(0.7917)">
+              <path fill-rule="evenodd" clip-rule="evenodd" d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z" fill="#37352F"/>
+            </g>
+            <text x="564" y="118.5" class="source-title">Claude Code</text>
+            <text x="564" y="133.5" class="source-maker">Anthropic</text>
+          </g>
+        
+          <g>
+            <rect x="742" y="94" width="218" height="54" rx="11" fill="#F7F6F3"/>
+            <rect x="753" y="104" width="34" height="34" rx="8" fill="#FFFFFF"/>
+            <g transform="translate(760.5,111.5) scale(0.7917)">
+              <path fill-rule="evenodd" clip-rule="evenodd" d="M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.14.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.73 1.73 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z" fill="#37352F"/>
+            </g>
+            <text x="798" y="118.5" class="source-title">DeepSeek</text>
+            <text x="798" y="133.5" class="source-maker">DeepSeek</text>
+          </g>
+        
+  </g>
+
+  <!-- SINGLE CALM DOWNWARD CUE (Zero spaghetti!) -->
+  <g id="flow-down-top">
+    <text x="484" y="169" text-anchor="end" class="muted-note">quietly observed</text>
+    <line x1="500" y1="154" x2="500" y2="177" stroke="#BDBBB4" stroke-width="1.35" stroke-linecap="round"/>
+    <path d="M 495.8 172.8 L 500 177.5 L 504.2 172.8" fill="none" stroke="#BDBBB4" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="516" y="169" text-anchor="start" class="muted-note">no wrappers</text>
+  </g>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       ZONE 2: THE SINGLE CRISP HERO WORKSPACE FRAME
+       ═══════════════════════════════════════════════════════════════ -->
+  <g id="planar-workspace">
+    <!-- Hero paper window (the ONLY crisp-outlined frame on the canvas) -->
+    <rect x="40" y="184" width="920" height="242" rx="14" fill="#FFFFFF" stroke="#D5D3CD" stroke-width="1.25" filter="url(#hero-shadow)"/>
+
+    <!-- Minimal Top Bar -->
+    <rect x="40" y="184" width="920" height="38" fill="#FBFAF8" clip-path="url(#page-topbar-clip)"/>
+    <line x1="40" y1="222" x2="960" y2="222" stroke="#EFEEEA" stroke-width="1"/>
+
+    <!-- Subtle window dots + breadcrumb -->
+    <circle cx="58" cy="203" r="2.8" fill="#DEDCD6"/>
+    <circle cx="68.5" cy="203" r="2.8" fill="#DEDCD6"/>
+    <circle cx="79" cy="203" r="2.8" fill="#DEDCD6"/>
+
+    
+      <g transform="translate(94.00,195.50) scale(0.62500)">
+        <g clip-path="url(#planar-clip-mini)">
+          <rect x="0" y="0" width="24" height="24" fill="#E63B7A"/>
+          <path d="M 0 0 H 24 V 4.15 H 16 A 8 8 0 0 1 8 12.15 H 0 Z" fill="#F27D16"/>
+          <path d="M 0 12 H 8 A 8 8 0 0 0 16 4 H 24 V 12 H 16 L 8 20 H 0 Z" fill="#2945F5"/>
+        </g>
+      </g>
+    
+    <text x="116" y="207.2" style="font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;font-size:12.4px;font-weight:650;fill:#37352F;">Planar</text>
+    <text x="159" y="207.2" class="muted-note">/</text>
+    <text x="169" y="207.2" style="font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;font-size:12px;font-weight:500;fill:#787774;">This Week</text>
+
+    <!-- Unboxed clean text view & lens controls (explicit airy spacing!) -->
+    <text x="728" y="207" text-anchor="middle" style="font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;font-size:11px;font-weight:600;fill:#37352F;">Time</text>
+    <text x="777" y="207" text-anchor="middle" style="font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;font-size:11px;font-weight:500;fill:#A4A39E;">Tokens</text>
+    <text x="824" y="207" text-anchor="middle" style="font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;font-size:11px;font-weight:500;fill:#A4A39E;">Cost</text>
+    <line x1="854" y1="196" x2="854" y2="210" stroke="#E8E6E0" stroke-width="1"/>
+    <text x="883" y="207" text-anchor="middle" style="font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;font-size:11.2px;font-weight:650;fill:#37352F;">Week</text>
+    <line x1="869" y1="213.5" x2="897" y2="213.5" stroke="#37352F" stroke-width="1.6" stroke-linecap="round"/>
+    <text x="926" y="207" text-anchor="middle" style="font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;font-size:11.2px;font-weight:500;fill:#A4A39E;">Day</text>
+
+    <!-- ── LEFT MODULE: CALM LINES × TIME WORKSTREAM MAP ── -->
+    <text x="60" y="247" class="kicker">ACTIVE LINES</text>
+
+    <!-- Clean airy weekday headers (zero vertical gridline clutter) -->
+    <text x="288" y="247" text-anchor="middle" class="axis-label">Mon</text><text x="368" y="247" text-anchor="middle" class="axis-label">Tue</text><text x="448" y="247" text-anchor="middle" class="axis-label">Wed</text><text x="528" y="247" text-anchor="middle" class="axis-label">Thu</text><text x="624" y="247" text-anchor="middle" class="axis-label">Fri</text>
+
+    <!-- Smooth C1 OKLab variable-thickness workstream bands -->
+    
+          <rect x="60" y="272" width="8.5" height="8.5" rx="2.5" fill="#A43D74"/>
+          <text x="76" y="280" class="line-label">Auth & Sign-in</text>
+          <text x="230" y="279.5" text-anchor="end" class="tabular-num">3h 40m</text>
+        <path d="M 256.00 273.00 L 258.00 273.00 L 260.00 273.00 L 262.00 273.00 L 264.00 273.00 L 266.00 273.00 L 268.00 273.00 L 270.00 273.00 L 272.00 273.00 L 274.00 273.00 L 276.00 273.00 L 278.00 273.00 L 280.00 273.00 L 282.00 273.00 L 284.00 273.00 L 286.00 273.00 L 288.00 273.00 L 290.00 273.00 L 292.00 272.95 L 294.00 272.78 L 296.00 272.47 L 298.00 272.04 L 300.00 271.48 L 302.00 270.89 L 304.00 270.42 L 306.00 270.09 L 308.00 269.88 L 310.00 269.80 L 312.00 269.80 L 314.00 269.80 L 316.00 269.80 L 318.00 269.80 L 320.00 269.80 L 322.00 269.80 L 324.00 269.80 L 326.00 269.80 L 328.00 269.80 L 330.00 269.80 L 332.00 269.80 L 334.00 269.80 L 336.00 269.80 L 338.00 269.80 L 340.00 269.80 L 342.00 269.80 L 344.00 269.80 L 346.00 269.80 L 348.00 269.80 L 350.00 269.80 L 352.00 269.80 L 354.00 269.85 L 356.00 270.01 L 358.00 270.30 L 360.00 270.70 L 362.00 271.23 L 364.00 271.78 L 366.00 272.21 L 368.00 272.53 L 370.00 272.73 L 372.00 272.80 L 374.00 272.80 L 376.00 272.80 L 378.00 272.80 L 380.00 272.80 L 382.00 272.80 L 384.00 272.80 L 386.00 272.80 L 388.00 272.80 L 390.00 272.80 L 392.00 272.80 L 394.00 272.80 L 396.00 272.80 L 398.00 272.80 L 400.00 272.80 L 402.00 272.80 L 404.00 272.80 L 406.00 272.80 L 408.00 272.80 A 3.20 3.20 0 0 1 408.00 279.20 L 406.00 279.20 L 404.00 279.20 L 402.00 279.20 L 400.00 279.20 L 398.00 279.20 L 396.00 279.20 L 394.00 279.20 L 392.00 279.20 L 390.00 279.20 L 388.00 279.20 L 386.00 279.20 L 384.00 279.20 L 382.00 279.20 L 380.00 279.20 L 378.00 279.20 L 376.00 279.20 L 374.00 279.20 L 372.00 279.20 L 370.00 279.27 L 368.00 279.47 L 366.00 279.79 L 364.00 280.22 L 362.00 280.77 L 360.00 281.30 L 358.00 281.70 L 356.00 281.99 L 354.00 282.15 L 352.00 282.20 L 350.00 282.20 L 348.00 282.20 L 346.00 282.20 L 344.00 282.20 L 342.00 282.20 L 340.00 282.20 L 338.00 282.20 L 336.00 282.20 L 334.00 282.20 L 332.00 282.20 L 330.00 282.20 L 328.00 282.20 L 326.00 282.20 L 324.00 282.20 L 322.00 282.20 L 320.00 282.20 L 318.00 282.20 L 316.00 282.20 L 314.00 282.20 L 312.00 282.20 L 310.00 282.20 L 308.00 282.12 L 306.00 281.91 L 304.00 281.58 L 302.00 281.11 L 300.00 280.52 L 298.00 279.96 L 296.00 279.53 L 294.00 279.22 L 292.00 279.05 L 290.00 279.00 L 288.00 279.00 L 286.00 279.00 L 284.00 279.00 L 282.00 279.00 L 280.00 279.00 L 278.00 279.00 L 276.00 279.00 L 274.00 279.00 L 272.00 279.00 L 270.00 279.00 L 268.00 279.00 L 266.00 279.00 L 264.00 279.00 L 262.00 279.00 L 260.00 279.00 L 258.00 279.00 L 256.00 279.00 A 3.00 3.00 0 0 1 256.00 273.00 Z" fill="#A43D74"/><path d="M 466.00 273.00 L 468.00 273.00 L 470.00 273.00 L 472.00 273.00 L 474.00 273.00 L 476.00 273.00 L 478.00 273.00 L 480.00 273.00 L 482.00 273.00 L 484.00 273.00 L 486.00 273.00 L 488.00 273.00 L 490.00 273.00 L 492.00 273.00 L 494.00 273.00 L 496.00 273.00 L 498.00 273.00 L 500.00 273.00 L 502.00 272.96 L 504.00 272.83 L 506.00 272.60 L 508.00 272.28 L 510.00 271.86 L 512.00 271.42 L 514.00 271.07 L 516.00 270.82 L 518.00 270.66 L 520.00 270.60 L 522.00 270.60 L 524.00 270.60 L 526.00 270.60 L 528.00 270.60 L 530.00 270.60 L 532.00 270.60 L 534.00 270.60 L 536.00 270.60 L 538.00 270.60 L 540.00 270.60 L 542.00 270.60 L 544.00 270.60 L 546.00 270.60 L 548.00 270.60 L 550.00 270.60 L 552.00 270.60 L 554.00 270.60 L 556.00 270.60 L 558.00 270.60 L 560.00 270.60 L 562.00 270.60 L 564.00 270.60 L 566.00 270.60 L 568.00 270.60 L 570.00 270.60 L 572.00 270.60 L 574.00 270.60 L 576.00 270.60 A 5.40 5.40 0 0 1 576.00 281.40 L 574.00 281.40 L 572.00 281.40 L 570.00 281.40 L 568.00 281.40 L 566.00 281.40 L 564.00 281.40 L 562.00 281.40 L 560.00 281.40 L 558.00 281.40 L 556.00 281.40 L 554.00 281.40 L 552.00 281.40 L 550.00 281.40 L 548.00 281.40 L 546.00 281.40 L 544.00 281.40 L 542.00 281.40 L 540.00 281.40 L 538.00 281.40 L 536.00 281.40 L 534.00 281.40 L 532.00 281.40 L 530.00 281.40 L 528.00 281.40 L 526.00 281.40 L 524.00 281.40 L 522.00 281.40 L 520.00 281.40 L 518.00 281.34 L 516.00 281.18 L 514.00 280.93 L 512.00 280.58 L 510.00 280.14 L 508.00 279.72 L 506.00 279.40 L 504.00 279.17 L 502.00 279.04 L 500.00 279.00 L 498.00 279.00 L 496.00 279.00 L 494.00 279.00 L 492.00 279.00 L 490.00 279.00 L 488.00 279.00 L 486.00 279.00 L 484.00 279.00 L 482.00 279.00 L 480.00 279.00 L 478.00 279.00 L 476.00 279.00 L 474.00 279.00 L 472.00 279.00 L 470.00 279.00 L 468.00 279.00 L 466.00 279.00 A 3.00 3.00 0 0 1 466.00 273.00 Z" fill="#A43D74"/><rect x="50" y="297" width="612" height="30" rx="6" fill="#FAF9F6"/>
+          <rect x="60" y="308" width="8.5" height="8.5" rx="2.5" fill="#2656C4"/>
+          <text x="76" y="316" class="line-label">Search Overhaul</text>
+          <text x="230" y="315.5" text-anchor="end" class="tabular-num">4h 15m</text>
+        <path d="M 264.00 308.00 L 266.00 308.00 L 268.00 308.00 L 270.00 308.00 L 272.00 308.00 L 274.00 308.00 L 276.00 308.00 L 278.00 308.00 L 280.00 308.00 L 282.00 308.00 L 284.00 308.00 L 286.00 308.00 L 288.00 308.00 L 290.00 308.00 L 292.00 308.00 L 294.00 308.00 L 296.00 308.00 L 298.00 308.00 L 300.00 308.00 L 302.00 308.00 L 304.00 308.00 L 306.00 308.00 L 308.00 307.94 L 310.00 307.73 L 312.00 307.37 L 314.00 306.86 L 316.00 306.19 L 318.00 305.49 L 320.00 304.94 L 322.00 304.54 L 324.00 304.30 L 326.00 304.20 L 328.00 304.20 L 330.00 304.20 L 332.00 304.20 L 334.00 304.20 L 336.00 304.20 L 338.00 304.20 L 340.00 304.20 L 342.00 304.20 L 344.00 304.20 L 346.00 304.20 L 348.00 304.20 L 350.00 304.20 L 352.00 304.20 L 354.00 304.20 L 356.00 304.20 L 358.00 304.20 L 360.00 304.20 L 362.00 304.20 L 364.00 304.20 L 366.00 304.20 L 368.00 304.20 L 370.00 304.20 L 372.00 304.20 L 374.00 304.20 L 376.00 304.20 L 378.00 304.20 L 380.00 304.20 L 382.00 304.27 L 384.00 304.52 L 386.00 304.96 L 388.00 305.58 L 390.00 306.38 L 392.00 307.24 L 394.00 307.90 L 396.00 308.39 L 398.00 308.69 L 400.00 308.80 L 402.00 308.80 L 404.00 308.80 L 406.00 308.80 L 408.00 308.80 L 410.00 308.80 L 412.00 308.80 L 414.00 308.80 L 416.00 308.80 L 418.00 308.80 L 420.00 308.80 L 422.00 308.80 L 424.00 308.80 L 426.00 308.80 L 428.00 308.80 L 430.00 308.80 L 432.00 308.80 L 434.00 308.80 L 436.00 308.76 L 438.00 308.63 L 440.00 308.40 L 442.00 308.08 L 444.00 307.66 L 446.00 307.22 L 448.00 306.87 L 450.00 306.62 L 452.00 306.46 L 454.00 306.40 L 456.00 306.40 L 458.00 306.40 L 460.00 306.40 L 462.00 306.40 L 464.00 306.40 L 466.00 306.40 L 468.00 306.40 L 470.00 306.40 L 472.00 306.40 L 474.00 306.40 L 476.00 306.40 L 478.00 306.40 L 480.00 306.40 L 482.00 306.40 L 484.00 306.40 L 486.00 306.40 L 488.00 306.40 L 490.00 306.40 L 492.00 306.40 L 494.00 306.40 L 496.00 306.43 L 498.00 306.55 L 500.00 306.76 L 502.00 307.06 L 504.00 307.44 L 506.00 307.85 L 508.00 308.17 L 510.00 308.40 L 512.00 308.55 L 514.00 308.60 L 516.00 308.60 L 518.00 308.60 L 520.00 308.60 L 522.00 308.60 L 524.00 308.60 L 526.00 308.60 L 528.00 308.60 L 530.00 308.60 L 532.00 308.60 L 534.00 308.60 L 536.00 308.60 L 538.00 308.60 L 540.00 308.60 L 542.00 308.60 L 544.00 308.60 L 546.00 308.60 L 548.00 308.60 L 550.00 308.60 L 552.00 308.60 L 554.00 308.60 L 556.00 308.60 L 558.00 308.60 L 560.00 308.60 L 562.00 308.60 L 564.00 308.60 L 566.00 308.60 L 568.00 308.60 L 570.00 308.60 L 572.00 308.60 L 574.00 308.60 L 576.00 308.60 A 3.40 3.40 0 0 1 576.00 315.40 L 574.00 315.40 L 572.00 315.40 L 570.00 315.40 L 568.00 315.40 L 566.00 315.40 L 564.00 315.40 L 562.00 315.40 L 560.00 315.40 L 558.00 315.40 L 556.00 315.40 L 554.00 315.40 L 552.00 315.40 L 550.00 315.40 L 548.00 315.40 L 546.00 315.40 L 544.00 315.40 L 542.00 315.40 L 540.00 315.40 L 538.00 315.40 L 536.00 315.40 L 534.00 315.40 L 532.00 315.40 L 530.00 315.40 L 528.00 315.40 L 526.00 315.40 L 524.00 315.40 L 522.00 315.40 L 520.00 315.40 L 518.00 315.40 L 516.00 315.40 L 514.00 315.40 L 512.00 315.45 L 510.00 315.60 L 508.00 315.83 L 506.00 316.15 L 504.00 316.56 L 502.00 316.94 L 500.00 317.24 L 498.00 317.45 L 496.00 317.57 L 494.00 317.60 L 492.00 317.60 L 490.00 317.60 L 488.00 317.60 L 486.00 317.60 L 484.00 317.60 L 482.00 317.60 L 480.00 317.60 L 478.00 317.60 L 476.00 317.60 L 474.00 317.60 L 472.00 317.60 L 470.00 317.60 L 468.00 317.60 L 466.00 317.60 L 464.00 317.60 L 462.00 317.60 L 460.00 317.60 L 458.00 317.60 L 456.00 317.60 L 454.00 317.60 L 452.00 317.54 L 450.00 317.38 L 448.00 317.13 L 446.00 316.78 L 444.00 316.34 L 442.00 315.92 L 440.00 315.60 L 438.00 315.37 L 436.00 315.24 L 434.00 315.20 L 432.00 315.20 L 430.00 315.20 L 428.00 315.20 L 426.00 315.20 L 424.00 315.20 L 422.00 315.20 L 420.00 315.20 L 418.00 315.20 L 416.00 315.20 L 414.00 315.20 L 412.00 315.20 L 410.00 315.20 L 408.00 315.20 L 406.00 315.20 L 404.00 315.20 L 402.00 315.20 L 400.00 315.20 L 398.00 315.31 L 396.00 315.61 L 394.00 316.10 L 392.00 316.76 L 390.00 317.62 L 388.00 318.42 L 386.00 319.04 L 384.00 319.48 L 382.00 319.73 L 380.00 319.80 L 378.00 319.80 L 376.00 319.80 L 374.00 319.80 L 372.00 319.80 L 370.00 319.80 L 368.00 319.80 L 366.00 319.80 L 364.00 319.80 L 362.00 319.80 L 360.00 319.80 L 358.00 319.80 L 356.00 319.80 L 354.00 319.80 L 352.00 319.80 L 350.00 319.80 L 348.00 319.80 L 346.00 319.80 L 344.00 319.80 L 342.00 319.80 L 340.00 319.80 L 338.00 319.80 L 336.00 319.80 L 334.00 319.80 L 332.00 319.80 L 330.00 319.80 L 328.00 319.80 L 326.00 319.80 L 324.00 319.70 L 322.00 319.46 L 320.00 319.06 L 318.00 318.51 L 316.00 317.81 L 314.00 317.14 L 312.00 316.63 L 310.00 316.27 L 308.00 316.06 L 306.00 316.00 L 304.00 316.00 L 302.00 316.00 L 300.00 316.00 L 298.00 316.00 L 296.00 316.00 L 294.00 316.00 L 292.00 316.00 L 290.00 316.00 L 288.00 316.00 L 286.00 316.00 L 284.00 316.00 L 282.00 316.00 L 280.00 316.00 L 278.00 316.00 L 276.00 316.00 L 274.00 316.00 L 272.00 316.00 L 270.00 316.00 L 268.00 316.00 L 266.00 316.00 L 264.00 316.00 A 4.00 4.00 0 0 1 264.00 308.00 Z" fill="#2656C4"/>
+          <rect x="60" y="346" width="8.5" height="8.5" rx="2.5" fill="#2E8540"/>
+          <text x="76" y="354" class="line-label">Launch Prep</text>
+          <text x="230" y="353.5" text-anchor="end" class="tabular-num">2h 50m</text>
+        <path d="M 476.00 344.50 L 478.00 344.50 L 480.00 344.50 L 482.00 344.50 L 484.00 344.50 L 486.00 344.50 L 488.00 344.50 L 490.00 344.50 L 492.00 344.50 L 494.00 344.50 L 496.00 344.50 L 498.00 344.50 L 500.00 344.50 L 502.00 344.50 L 504.00 344.50 L 506.00 344.50 L 508.00 344.53 L 510.00 344.65 L 512.00 344.86 L 514.00 345.16 L 516.00 345.55 L 518.00 345.95 L 520.00 346.27 L 522.00 346.50 L 524.00 346.64 L 526.00 346.70 L 528.00 346.70 L 530.00 346.70 L 532.00 346.70 L 534.00 346.70 L 536.00 346.70 L 538.00 346.70 L 540.00 346.70 L 542.00 346.70 L 544.00 346.70 L 546.00 346.70 L 548.00 346.70 L 550.00 346.70 L 552.00 346.70 L 554.00 346.70 L 556.00 346.70 L 558.00 346.70 L 560.00 346.70 L 562.00 346.70 L 564.00 346.70 L 566.00 346.70 L 568.00 346.70 L 570.00 346.70 L 572.00 346.70 L 574.00 346.70 L 576.00 346.70 A 3.30 3.30 0 0 1 576.00 353.30 L 574.00 353.30 L 572.00 353.30 L 570.00 353.30 L 568.00 353.30 L 566.00 353.30 L 564.00 353.30 L 562.00 353.30 L 560.00 353.30 L 558.00 353.30 L 556.00 353.30 L 554.00 353.30 L 552.00 353.30 L 550.00 353.30 L 548.00 353.30 L 546.00 353.30 L 544.00 353.30 L 542.00 353.30 L 540.00 353.30 L 538.00 353.30 L 536.00 353.30 L 534.00 353.30 L 532.00 353.30 L 530.00 353.30 L 528.00 353.30 L 526.00 353.30 L 524.00 353.36 L 522.00 353.50 L 520.00 353.73 L 518.00 354.05 L 516.00 354.45 L 514.00 354.84 L 512.00 355.14 L 510.00 355.35 L 508.00 355.47 L 506.00 355.50 L 504.00 355.50 L 502.00 355.50 L 500.00 355.50 L 498.00 355.50 L 496.00 355.50 L 494.00 355.50 L 492.00 355.50 L 490.00 355.50 L 488.00 355.50 L 486.00 355.50 L 484.00 355.50 L 482.00 355.50 L 480.00 355.50 L 478.00 355.50 L 476.00 355.50 A 5.50 5.50 0 0 1 476.00 344.50 Z" fill="#2E8540"/>
+          <rect x="60" y="380" width="8.5" height="8.5" rx="2.5" fill="#B84A32"/>
+          <text x="76" y="388" class="line-label">Mobile Polish</text>
+          <text x="230" y="387.5" text-anchor="end" class="tabular-num">1h 55m</text>
+        <path d="M 274.00 380.80 L 276.00 380.80 L 278.00 380.80 L 280.00 380.80 L 282.00 380.80 L 284.00 380.80 L 286.00 380.80 L 288.00 380.80 L 290.00 380.80 L 292.00 380.80 L 294.00 380.80 L 296.00 380.80 L 298.00 380.80 L 300.00 380.80 L 302.00 380.80 L 304.00 380.80 L 306.00 380.80 L 308.00 380.80 L 310.00 380.80 L 312.00 380.80 L 314.00 380.80 L 316.00 380.80 L 318.00 380.80 L 320.00 380.80 L 322.00 380.80 L 324.00 380.80 L 326.00 380.80 L 328.00 380.80 L 330.00 380.80 L 332.00 380.80 L 334.00 380.80 L 336.00 380.80 L 338.00 380.80 A 3.20 3.20 0 0 1 338.00 387.20 L 336.00 387.20 L 334.00 387.20 L 332.00 387.20 L 330.00 387.20 L 328.00 387.20 L 326.00 387.20 L 324.00 387.20 L 322.00 387.20 L 320.00 387.20 L 318.00 387.20 L 316.00 387.20 L 314.00 387.20 L 312.00 387.20 L 310.00 387.20 L 308.00 387.20 L 306.00 387.20 L 304.00 387.20 L 302.00 387.20 L 300.00 387.20 L 298.00 387.20 L 296.00 387.20 L 294.00 387.20 L 292.00 387.20 L 290.00 387.20 L 288.00 387.20 L 286.00 387.20 L 284.00 387.20 L 282.00 387.20 L 280.00 387.20 L 278.00 387.20 L 276.00 387.20 L 274.00 387.20 A 3.20 3.20 0 0 1 274.00 380.80 Z" fill="#B84A32"/><path d="M 418.00 381.00 L 420.00 381.00 L 422.00 381.00 L 424.00 381.00 L 426.00 381.00 L 428.00 381.00 L 430.00 381.00 L 432.00 381.00 L 434.00 381.00 L 436.00 381.00 L 438.00 381.00 L 440.00 381.00 L 442.00 381.00 L 444.00 381.00 L 446.00 381.00 L 448.00 381.00 L 450.00 381.00 L 452.00 381.00 L 454.00 381.00 L 456.00 380.96 L 458.00 380.83 L 460.00 380.60 L 462.00 380.28 L 464.00 379.86 L 466.00 379.42 L 468.00 379.07 L 470.00 378.82 L 472.00 378.66 L 474.00 378.60 L 476.00 378.60 L 478.00 378.60 L 480.00 378.60 L 482.00 378.60 L 484.00 378.60 L 486.00 378.60 L 488.00 378.60 L 490.00 378.60 L 492.00 378.60 L 494.00 378.60 L 496.00 378.60 L 498.00 378.60 L 500.00 378.60 L 502.00 378.60 L 504.00 378.60 L 506.00 378.60 L 508.00 378.60 L 510.00 378.60 L 512.00 378.60 L 514.00 378.60 L 516.00 378.60 L 518.00 378.60 L 520.00 378.60 L 522.00 378.64 L 524.00 378.77 L 526.00 379.00 L 528.00 379.32 L 530.00 379.74 L 532.00 380.18 L 534.00 380.53 L 536.00 380.78 L 538.00 380.94 L 540.00 381.00 L 542.00 381.00 L 544.00 381.00 L 546.00 381.00 L 548.00 381.00 L 550.00 381.00 L 552.00 381.00 L 554.00 381.00 L 556.00 381.00 L 558.00 381.00 L 560.00 381.00 L 562.00 381.00 L 564.00 381.00 L 566.00 381.00 L 568.00 381.00 L 570.00 381.00 L 572.00 381.00 L 574.00 381.00 L 576.00 381.00 A 3.00 3.00 0 0 1 576.00 387.00 L 574.00 387.00 L 572.00 387.00 L 570.00 387.00 L 568.00 387.00 L 566.00 387.00 L 564.00 387.00 L 562.00 387.00 L 560.00 387.00 L 558.00 387.00 L 556.00 387.00 L 554.00 387.00 L 552.00 387.00 L 550.00 387.00 L 548.00 387.00 L 546.00 387.00 L 544.00 387.00 L 542.00 387.00 L 540.00 387.00 L 538.00 387.06 L 536.00 387.22 L 534.00 387.47 L 532.00 387.82 L 530.00 388.26 L 528.00 388.68 L 526.00 389.00 L 524.00 389.23 L 522.00 389.36 L 520.00 389.40 L 518.00 389.40 L 516.00 389.40 L 514.00 389.40 L 512.00 389.40 L 510.00 389.40 L 508.00 389.40 L 506.00 389.40 L 504.00 389.40 L 502.00 389.40 L 500.00 389.40 L 498.00 389.40 L 496.00 389.40 L 494.00 389.40 L 492.00 389.40 L 490.00 389.40 L 488.00 389.40 L 486.00 389.40 L 484.00 389.40 L 482.00 389.40 L 480.00 389.40 L 478.00 389.40 L 476.00 389.40 L 474.00 389.40 L 472.00 389.34 L 470.00 389.18 L 468.00 388.93 L 466.00 388.58 L 464.00 388.14 L 462.00 387.72 L 460.00 387.40 L 458.00 387.17 L 456.00 387.04 L 454.00 387.00 L 452.00 387.00 L 450.00 387.00 L 448.00 387.00 L 446.00 387.00 L 444.00 387.00 L 442.00 387.00 L 440.00 387.00 L 438.00 387.00 L 436.00 387.00 L 434.00 387.00 L 432.00 387.00 L 430.00 387.00 L 428.00 387.00 L 426.00 387.00 L 424.00 387.00 L 422.00 387.00 L 420.00 387.00 L 418.00 387.00 A 3.00 3.00 0 0 1 418.00 381.00 Z" fill="#B84A32"/>
+
+    <!-- Single quiet vertical `Now` hairline -->
+    <line x1="576" y1="254" x2="576" y2="396" stroke="#D2D0CA" stroke-width="1.2" stroke-dasharray="3 3"/>
+    <rect x="560" y="236" width="32" height="15" rx="4" fill="#37352F"/>
+    <text x="576" y="246.7" text-anchor="middle" style="font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:9px;font-weight:650;fill:#FFFFFF;">Now</text>
+    <circle cx="576" cy="312" r="3.2" fill="#FFFFFF" stroke="#2656C4" stroke-width="2"/>
+
+    <!-- Soft borderless butter CUJ recap peek (ZERO heavy black box!) -->
+    <g id="cuj-recap-peek">
+      <line x1="354" y1="321" x2="354" y2="335" stroke="#C8C5BC" stroke-width="1.15"/>
+      <circle cx="354" cy="320" r="2.1" fill="#FFFFFF" stroke="#2656C4" stroke-width="1.5"/>
+      <rect x="254" y="335" width="204" height="23" rx="7" fill="#FBF3DB"/>
+      <circle cx="265.5" cy="346.5" r="2.6" fill="#E07B16"/>
+      <text x="274" y="349.8" style="font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;font-size:9.8px;fill:#5C574D;">
+        <tspan style="font-weight:650;fill:#37352F;">Stopped at:</tspan>
+        <tspan> refresh flow</tspan>
+        <tspan fill="#B8AF98"> · </tspan>
+        <tspan style="font-weight:600;fill:#A8432C;">1 left open</tspan>
+      </text>
+    </g>
+
+    <!-- Single quiet footer readout with generous vertical air -->
+    <text x="60" y="411" class="muted-note" style="font-size:10.2px;">
+      <tspan style="font-weight:600;fill:#55534D;">4 active lines</tspan>
+      <tspan> · 12h 40m agent time</tspan>
+    </text>
+
+    <!-- ── RIGHT MODULE: ONE SERENE BORDERLESS NOTION SIDE-NOTE PANEL ── -->
+    <g id="workspace-notes">
+      <rect x="686" y="238" width="256" height="172" rx="11" fill="#F7F6F3"/>
+
+      <!-- For You -->
+      <circle cx="709" cy="260" r="6" fill="#FFFFFF" stroke="#37352F" stroke-width="1.3"/>
+      <path d="M 711.5 257.5 L 709.7 261.1 L 706.5 262.5 L 708.3 258.9 Z" fill="#37352F"/>
+      <text x="722" y="264" class="callout-title">For You</text>
+      <text x="703" y="282.5" class="callout-body">See where each line stopped, what’s</text>
+      <text x="703" y="296.5" class="callout-body">left open, and where your week went.</text>
+      <text x="703" y="313" class="callout-keywords">Plan  ·  Reflect  ·  Resume</text>
+
+      <!-- Single whisper inner divider -->
+      <line x1="703" y1="326" x2="925" y2="326" stroke="#EAE8E2" stroke-width="1"/>
+
+      <!-- For Your Agents -->
+      <path d="M 709 341 L 715.5 344.2 L 709 347.4 L 702.5 344.2 Z" fill="#FFFFFF" stroke="#37352F" stroke-width="1.25" stroke-linejoin="round"/>
+      <path d="M 703 347.6 L 709 350.6 L 715 347.6" fill="none" stroke="#37352F" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="722" y="350" class="callout-title">For Your Agents</text>
+      <text x="703" y="368.5" class="callout-body">Ask naturally — your agent reads just</text>
+      <text x="703" y="382.5" class="callout-body">the line it needs to pick back up.</text>
+      <text x="703" y="399" class="callout-keywords">Ask  ·  Context  ·  Handoff</text>
+    </g>
+  </g>
+
+  <!-- SINGLE CALM DOWNWARD CUE TO SURFACES (Zero 3-way bracket!) -->
+  <g id="flow-down-bottom">
+    <text x="484" y="450" text-anchor="end" class="muted-note">one shared map</text>
+    <line x1="500" y1="434" x2="500" y2="457" stroke="#BDBBB4" stroke-width="1.35" stroke-linecap="round"/>
+    <path d="M 495.8 452.8 L 500 457.5 L 504.2 452.8" fill="none" stroke="#BDBBB4" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="516" y="450" text-anchor="start" class="muted-note">every surface</text>
+  </g>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       ZONE 3: THREE SERENE BORDERLESS NOTION SURFACE BLOCKS
+       ═══════════════════════════════════════════════════════════════ -->
+  <g id="ecosystem-surfaces">
+
+    <!-- Surface 1: Planar App -->
+    <g id="card-app">
+      <rect x="40" y="466" width="296" height="98" rx="12" fill="#F7F6F3"/>
+      <rect x="56" y="480" width="36" height="36" rx="9" fill="#FFFFFF"/>
+      
+      <path d="M 82.25 497.09 L 84.58 497.33 L 84.58 498.67 L 82.25 498.91 L 81.97 500.32 L 84.03 501.43 L 83.52 502.66 L 81.27 502.00 L 80.48 503.19 L 81.95 505.01 L 81.01 505.95 L 79.19 504.48 L 78.00 505.27 L 78.66 507.52 L 77.43 508.03 L 76.32 505.97 L 74.91 506.25 L 74.67 508.58 L 73.33 508.58 L 73.09 506.25 L 71.68 505.97 L 70.57 508.03 L 69.34 507.52 L 70.00 505.27 L 68.81 504.48 L 66.99 505.95 L 66.05 505.01 L 67.52 503.19 L 66.73 502.00 L 64.48 502.66 L 63.97 501.43 L 66.03 500.32 L 65.75 498.91 L 63.42 498.67 L 63.42 497.33 L 65.75 497.09 L 66.03 495.68 L 63.97 494.57 L 64.48 493.34 L 66.73 494.00 L 67.52 492.81 L 66.05 490.99 L 66.99 490.05 L 68.81 491.52 L 70.00 490.73 L 69.34 488.48 L 70.57 487.97 L 71.68 490.03 L 73.09 489.75 L 73.33 487.42 L 74.67 487.42 L 74.91 489.75 L 76.32 490.03 L 77.43 487.97 L 78.66 488.48 L 78.00 490.73 L 79.19 491.52 L 81.01 490.05 L 81.95 490.99 L 80.48 492.81 L 81.27 494.00 L 83.52 493.34 L 84.03 494.57 L 81.97 495.68 Z M 80.00 498.00 A 6.00 6.00 0 1 0 68.00 498.00 A 6.00 6.00 0 1 0 80.00 498.00 Z" fill="#37352F" fill-rule="evenodd"/>
+      <circle cx="74.00" cy="490.80" r="0.85" fill="#FFFFFF"/><circle cx="80.85" cy="495.78" r="0.85" fill="#FFFFFF"/><circle cx="78.23" cy="503.82" r="0.85" fill="#FFFFFF"/><circle cx="69.77" cy="503.82" r="0.85" fill="#FFFFFF"/><circle cx="67.15" cy="495.78" r="0.85" fill="#FFFFFF"/>
+      <text x="74.00" y="501.50" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-weight="800" font-size="10.2" fill="#37352F">R</text>
+    
+      <text x="103" y="495.5" class="surface-title">Planar App</text>
+      <text x="103" y="510.5" class="surface-tag">macOS desktop &amp; menu bar</text>
+      <text x="56" y="535" class="surface-desc">Native Rust app &amp; menu bar to plan,</text>
+      <text x="56" y="550" class="surface-desc">reflect, and resume in one click.</text>
+    </g>
+
+    <!-- Surface 2: MCP & Skills -->
+    <g id="card-mcp">
+      <rect x="352" y="466" width="296" height="98" rx="12" fill="#F7F6F3"/>
+      <!-- Clean paired white tile holding MCP mark + Hexagon skill mark side by side -->
+      <rect x="368" y="480" width="64" height="36" rx="9" fill="#FFFFFF"/>
+      
+      <path d="M 378.45 498.23 L 384.65 492.03 A 2.24 2.24 0 0 1 387.81 495.19 L 383.07 499.93" fill="none" stroke="#37352F" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M 381.24 501.76 L 389.03 493.97 A 2.24 2.24 0 0 1 392.19 497.14 L 388.91 500.42 Q 387.81 501.51 388.91 502.61 L 390.61 504.31" fill="none" stroke="#37352F" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+    
+      
+      <path d="M 415.50 489.20 L 423.12 493.60 L 423.12 502.40 L 415.50 506.80 L 407.88 502.40 L 407.88 493.60 Z" fill="#FFFFFF" stroke="#37352F" stroke-width="1.65" stroke-linejoin="round"/>
+      <path d="M 415.50 493.80 Q 415.50 496.75 419.70 498.00 Q 415.50 499.25 415.50 502.20 Q 415.50 499.25 411.30 498.00 Q 415.50 496.75 415.50 493.80 Z" fill="#37352F"/>
+    
+      <text x="444" y="495.5" class="surface-title">MCP &amp; Skills</text>
+      <text x="444" y="510.5" class="surface-tag">For personal agents</text>
+      <text x="368" y="535" class="surface-desc">Plain-language context for any personal</text>
+      <text x="368" y="550" class="surface-desc">agent — no CLI needed.</text>
+    </g>
+
+    <!-- Surface 3: IDE Sidebar -->
+    <g id="card-ide">
+      <rect x="664" y="466" width="296" height="98" rx="12" fill="#F7F6F3"/>
+      <rect x="680" y="480" width="36" height="36" rx="9" fill="#FFFFFF"/>
+      
+      <rect x="687.8" y="489.8" width="20.4" height="16.4" rx="3" fill="#FFFFFF" stroke="#37352F" stroke-width="1.6"/>
+      <path d="M 700.2 490.6 H 705.9 Q 707.4 490.6 707.4 492.1 V 503.9 Q 707.4 505.4 705.9 505.4 H 700.2 Z" fill="#F2F0EB"/>
+      <line x1="700.2" y1="489.8" x2="700.2" y2="506.2" stroke="#37352F" stroke-width="1.45"/>
+      <line x1="690.6" y1="494.5" x2="696.6" y2="494.5" stroke="#C2C0B8" stroke-width="1.35" stroke-linecap="round"/>
+      <line x1="690.6" y1="498.0" x2="697.5" y2="498.0" stroke="#C2C0B8" stroke-width="1.35" stroke-linecap="round"/>
+      <line x1="690.6" y1="501.5" x2="695.2" y2="501.5" stroke="#C2C0B8" stroke-width="1.35" stroke-linecap="round"/>
+      <line x1="702.4" y1="494.8" x2="705.9" y2="494.8" stroke="#2656C4" stroke-width="2.0" stroke-linecap="round"/>
+      <line x1="702.4" y1="498.3" x2="705.3" y2="498.3" stroke="#A43D74" stroke-width="2.0" stroke-linecap="round"/>
+      <line x1="702.4" y1="501.8" x2="705.7" y2="501.8" stroke="#2E8540" stroke-width="2.0" stroke-linecap="round"/>
+    
+      <text x="727" y="495.5" class="surface-title">IDE Sidebar</text>
+      <text x="727" y="510.5" class="surface-tag">Editor companion plugin</text>
+      <text x="680" y="535" class="surface-desc">Compact companion right beside your</text>
+      <text x="680" y="550" class="surface-desc">code — stay oriented without switching.</text>
+    </g>
+
+  </g>
+</svg>

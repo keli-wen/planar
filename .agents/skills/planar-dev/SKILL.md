@@ -22,7 +22,7 @@ Implementation, verification, issue-filing, and release workflow for the `keli-w
 | `crates/planar-core/` | `contexts/project/architecture.md`, `contexts/project/design.md` | `references/architecture.md` + `rust-best-practices` + `rust-async-patterns` |
 | `crates/planar-cli/` | `contexts/project/architecture.md` (§5) | `references/architecture.md` + `rust-best-practices` |
 | `src-tauri/` | `contexts/project/architecture.md` (§6) | `references/architecture.md` |
-| `ui/` & `assets/` | `contexts/engineering/ui-zero-fork.md` | `references/ui-zero-fork.md` |
+| `ui/` & `assets/` | `DESIGN.md`, `contexts/engineering/ui-zero-fork.md` | `references/ui-zero-fork.md` |
 | New harness ingestor / API provider | `contexts/project/architecture.md` | `references/add-harness-or-provider.md` |
 | Issues (`gh issue create`) | `contexts/CONTEXT_MAP.md`, `REVIEW.md` | `references/issue-filing.md` |
 | Pre-PR & Review (`gh pr create`) | `REVIEW.md`, `contexts/engineering/hooks-and-gates.md` | `references/verify-and-pre-pr.md` |

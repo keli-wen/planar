@@ -1,6 +1,6 @@
 # Zero-Fork Vanilla UI Contract (`./ui`)
 
-> Frontend engineering contract for `ui/index.html`, `ui/styles.css`, and `ui/app.js`, including why Planar deliberately skips React and frontend bundlers.
+> Frontend engineering contract for `ui/index.html`, `ui/styles.css`, and `ui/app.js`, including why Planar deliberately skips React and frontend bundlers. For exact visual tokens, palettes, typography, SVG geometry, and component specs, read [`DESIGN.md`](../../DESIGN.md) first.
 
 ---
 
@@ -25,7 +25,7 @@ Planar renders one unified UI across four surfaces: `Planar.app` (~15 MB Tauri v
 
 ## 3. Layout, Performance & Visual Guardrails
 
-- **Zero-jitter expand/collapse**: Preserve `scrollbar-gutter: stable`, synchronous `computePlotWidthSync()` before SVG generation, width-only `ResizeObserver`, and `window.scrollY` restoration across re-renders.
+- **Zero-jitter expand/collapse**: Preserve hidden 0px scrollbars + CSS `mask-image` edge feathering / `.scroll-more-cue`, synchronous `computePlotWidthSync()` before SVG generation, width-only `ResizeObserver`, and `window.scrollY` restoration across re-renders (see [`DESIGN.md`](../../DESIGN.md)).
 - **Container-responsive sidebar (`>= 300px`)**: Use CSS `@container` breakpoints (`<= 620px`, `<= 430px`) and test with `?mock=1&sidebar=350`.
 - **HTML5 Drag-and-Drop**: Maintain native `draggable="true"` session dependency linking and Line merge drag-and-drop (relying on `"dragDropEnabled": false` in `src-tauri/tauri.conf.json`).
 - **Dual Theme & Locale (`zh` / `en`, `system` / `light` / `dark`)**: Every user-visible string belongs in `I18N.zh` and `I18N.en`; categorical Line hues map between `PALETTE` (Light) and `DARK_PALETTE` (Dark) via `resolveLineColor()`.
