@@ -29,11 +29,11 @@ function attachPrTrace(cwd, trace) {
   }
 }
 
-export default async ({ task, cwd, trace }) => {
-  let work = await coder(`${devPrompt}\n\n## Task\n${task}`, { stage: 'dev' });
+export default async ({ prompt, cwd, trace }) => {
+  let work = await coder.run(`${devPrompt}\n\n## Task\n${prompt}`, { stage: 'dev' });
 
   work = await refine(work, {
-    by: reviewer,
+    evaluator: reviewer,
     criteria: 'Follow REVIEW.md (and rust-review / DESIGN.md for touched surfaces).',
     maxRounds: 2,
     stage: 'review',
@@ -44,7 +44,7 @@ export default async ({ task, cwd, trace }) => {
   if (!work.passed) notes.push(`Review residual note: ${work.feedback || work.summary}`);
 
   work = await refine(work, {
-    by: simplifier,
+    evaluator: simplifier,
     criteria: 'Follow SIMPLIFY.md.',
     maxRounds: 1,
     stage: 'simplify',
