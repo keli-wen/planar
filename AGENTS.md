@@ -18,6 +18,7 @@ Do not scan the whole repository blindly. Start at [`contexts/CONTEXT_MAP.md`](c
 | Git hooks, Agent `PreToolUse` guards, hygiene & CI | [`contexts/engineering/hooks-and-gates.md`](contexts/engineering/hooks-and-gates.md) |
 | Visual identity, color/type tokens, SVG geometry, UI components & design QA | [`DESIGN.md`](DESIGN.md) *(mandatory before any UI, icon, asset, or diagram edit)* |
 | Zero-fork vanilla `./ui` rules (and why Planar skips React) | [`contexts/engineering/ui-zero-fork.md`](contexts/engineering/ui-zero-fork.md) |
+| Orchestration, issue intake, parallelism, verification tiers & auth gates | [`WORKFLOW.md`](WORKFLOW.md) |
 | Tiered review rules (`T0`–`T3`) & contribution rules | [`REVIEW.md`](REVIEW.md) & [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Contributor SOPs (verify, pre-PR, issue filing, adapters, release) | [`.agents/skills/planar-dev/SKILL.md`](.agents/skills/planar-dev/SKILL.md) |
 | Rust idioms, async patterns & review rubric | `.agents/skills/rust-best-practices/SKILL.md`, `rust-async-patterns/SKILL.md`, `rust-review/SKILL.md` |

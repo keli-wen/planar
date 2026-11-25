@@ -31,7 +31,7 @@ contexts/
 | Subsystem guides & architectural trade-offs (e.g. UI, ingestors, MCP) | `contexts/engineering/<topic>.md` | Lowercase kebab-case |
 | Reusable coding-agent SOPs & step-by-step runbooks | `.agents/skills/planar-dev/` | Keep rules in `contexts/`, workflows in skills |
 | End-user runtime Agent Skill (shipped with Planar) | `skills/planar/SKILL.md` | Mirrors `planar` CLI & read-only MCP surface |
-| GitHub-required root community/policy/design files | Repo root (`README.md`, `README.zh-CN.md`, `AGENTS.md`, `CLAUDE.md`, `DESIGN.md`, `CONTRIBUTING.md`, `REVIEW.md`, `LICENSE`) | Never duplicate `contexts/` details here — link instead |
+| GitHub-required root community/policy/design files | Repo root (`README.md`, `README.zh-CN.md`, `AGENTS.md`, `CLAUDE.md`, `WORKFLOW.md`, `DESIGN.md`, `CONTRIBUTING.md`, `REVIEW.md`, `LICENSE`) | Never duplicate `contexts/` details here — link instead |
 
 ## Durable Context Rules
 
