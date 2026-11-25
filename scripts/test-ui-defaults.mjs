@@ -1,12 +1,40 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { extname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+const UI_DIR = fileURLToPath(new URL("../ui", import.meta.url));
 const DEFAULTS_PATH = fileURLToPath(new URL("../ui/defaults.json", import.meta.url));
-const APP_JS_PATH = fileURLToPath(new URL("../ui/app.js", import.meta.url));
 const DEFAULTS_RAW = readFileSync(DEFAULTS_PATH, "utf8");
 const DEFAULTS_JSON = JSON.parse(DEFAULTS_RAW);
+
+function collectUiJsFiles(dir = UI_DIR, out = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".") || entry.isSymbolicLink()) continue;
+    const abs = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      collectUiJsFiles(abs, out);
+    } else if (entry.isFile() && extname(entry.name) === ".js") {
+      out.push({ abs, rel: `ui/${relative(UI_DIR, abs).replaceAll("\\", "/")}` });
+    }
+  }
+  return out.sort((a, b) => a.rel.localeCompare(b.rel));
+}
+
+// Import pure leaf modules BEFORE installing any DOM globals, with fetch temporarily blocked,
+// to prove zero-DOM and zero-fetch import purity under Node >= 20.
+assert.equal(typeof globalThis.window, "undefined", "leaf import check expects no window global");
+assert.equal(typeof globalThis.document, "undefined", "leaf import check expects no document global");
+assert.equal(typeof globalThis.ResizeObserver, "undefined", "leaf import check expects no ResizeObserver global");
+const originalNodeFetch = globalThis.fetch;
+globalThis.fetch = async (url) => {
+  throw new Error(`Leaf UI module must not call fetch during import: ${String(url)}`);
+};
+const bandModule = await import("../ui/band.js");
+const mockModule = await import("../ui/mock.js");
+const i18nModule = await import("../ui/i18n.js");
+globalThis.fetch = originalNodeFetch;
 
 function makeElementStub() {
   return {
@@ -1199,7 +1227,7 @@ function findBalancedBlock(src, openIdx, openChar, closeChar) {
     }
     if (ch === "/" && next === "*") {
       const end = src.indexOf("*/", i + 2);
-      assert.notEqual(end, -1, "unterminated block comment in ui/app.js");
+      assert.notEqual(end, -1, "unterminated block comment in UI JS module");
       i = end + 1;
       continue;
     }
@@ -1251,6 +1279,79 @@ function maskRangePreservingNewlines(src, start, end) {
   return `${before}${middle}${after}`;
 }
 
+function findMissingTranslationKeys(sources, zhSet, enSet) {
+  const missing = [];
+  for (const { rel, src } of sources) {
+    for (const match of src.matchAll(/\bt\(\s*(["'`])([A-Za-z0-9_]+)\1/g)) {
+      const key = match[2];
+      if (!zhSet.has(key) || !enSet.has(key)) {
+        missing.push(`${rel}:${key}`);
+      }
+    }
+  }
+  return missing;
+}
+
+function extractStaticImportSpecifiers(src) {
+  const specs = [];
+  const re =
+    /^\s*(?:import\s+(?:["']([^"']+)["']|[^;]*?\bfrom\s+["']([^"']+)["'])|export\s+(?:\*(?:\s+as\s+[A-Za-z0-9_$]+)?|\{[^;{}]*\})\s+from\s+["']([^"']+)["'])\s*;?/gm;
+  for (const match of src.matchAll(re)) {
+    const spec = match[1] ?? match[2] ?? match[3];
+    if (spec) specs.push(spec);
+  }
+  return specs;
+}
+
+function buildUiImportGraph(sources) {
+  const knownFiles = new Set(sources.map((f) => f.rel));
+  const importsByFile = new Map();
+  for (const { rel, src } of sources) {
+    const specs = [];
+    for (const spec of extractStaticImportSpecifiers(src)) {
+      assert.ok(spec.startsWith("./"), `${rel} must use relative ./ ESM imports (found ${spec})`);
+      assert.ok(!spec.includes("?"), `${rel} must keep relative ESM imports unversioned (found ${spec})`);
+      const targetRel = `ui/${spec.slice(2)}`;
+      assert.ok(knownFiles.has(targetRel), `${rel} imports missing UI module ${spec}`);
+      specs.push(targetRel);
+    }
+    importsByFile.set(rel, specs);
+  }
+  return importsByFile;
+}
+
+function findImportCycle(importsByFile) {
+  const stateByNode = new Map(); // 0/undefined = unvisited, 1 = visiting, 2 = visited
+  const stack = [];
+
+  function dfs(node) {
+    stateByNode.set(node, 1);
+    stack.push(node);
+    for (const dep of importsByFile.get(node) || []) {
+      const depState = stateByNode.get(dep);
+      if (depState === 1) {
+        const idx = stack.indexOf(dep);
+        return [...stack.slice(idx), dep];
+      }
+      if (!depState) {
+        const cycle = dfs(dep);
+        if (cycle) return cycle;
+      }
+    }
+    stack.pop();
+    stateByNode.set(node, 2);
+    return null;
+  }
+
+  for (const node of importsByFile.keys()) {
+    if (!stateByNode.get(node)) {
+      const cycle = dfs(node);
+      if (cycle) return cycle;
+    }
+  }
+  return null;
+}
+
 test("I18N.zh and I18N.en have identical key sets, matching value shapes, and cover all static t() calls", () => {
   const zhKeys = Object.keys(I18N.zh);
   const enKeys = Object.keys(I18N.en);
@@ -1286,57 +1387,226 @@ test("I18N.zh and I18N.en have identical key sets, matching value shapes, and co
     }
   }
 
-  const appSrc = readFileSync(APP_JS_PATH, "utf8");
-  const missingTKeys = [];
-  for (const match of appSrc.matchAll(/\bt\(\s*"([A-Za-z0-9_]+)"/g)) {
-    const key = match[1];
-    if (!zhSet.has(key) || !enSet.has(key)) {
-      missingTKeys.push(key);
-    }
-  }
-  assert.deepEqual(missingTKeys, [], "static t(...) call references missing I18N key(s)");
+  const uiJsFiles = collectUiJsFiles();
+  assert.ok(uiJsFiles.length >= 4, `expected >= 4 UI JS modules, found ${uiJsFiles.length}`);
+  const uiSources = uiJsFiles.map(({ abs, rel }) => ({ rel, src: readFileSync(abs, "utf8") }));
+
+  assert.deepEqual(
+    findMissingTranslationKeys(uiSources, zhSet, enSet),
+    [],
+    "static t(...) call references missing I18N key(s)",
+  );
+
+  // Negative cases: unknown keys in double quotes, single quotes, and static template literals
+  // must all be flagged, while valid keys and dynamic interpolated templates are ignored.
+  const interpolationToken = ["$", "{suffix}"].join("");
+  const syntheticMissing = findMissingTranslationKeys(
+    [
+      {
+        rel: "ui/synthetic.js",
+        src: [
+          'const a = t("navPlane");',
+          "const b = t('missingSingleKey');",
+          'const c = t("missingDoubleKey");',
+          "const d = t(`missingTemplateKey`);",
+          "const e = t(`navPlane`);",
+          `const f = t(\`dynamic_${interpolationToken}\`);`,
+        ].join("\n"),
+      },
+    ],
+    zhSet,
+    enSet,
+  );
+  assert.deepEqual(syntheticMissing, [
+    "ui/synthetic.js:missingSingleKey",
+    "ui/synthetic.js:missingDoubleKey",
+    "ui/synthetic.js:missingTemplateKey",
+  ]);
 });
 
-test("ui/app.js contains no CJK characters outside LANG_OPTIONS and I18N.zh", () => {
-  const appSrc = readFileSync(APP_JS_PATH, "utf8");
+test("leaf UI modules (`band.js`, `mock.js`, `i18n.js`) work with zero DOM/fetch and form a strict 1-way DAG", () => {
+  // 1. Verify strict 1-way unversioned ESM import graph across every ui/*.js file.
+  const uiJsFiles = collectUiJsFiles();
+  const uiSources = uiJsFiles.map(({ abs, rel }) => ({ rel, src: readFileSync(abs, "utf8") }));
+  const importsByFile = buildUiImportGraph(uiSources);
 
-  const langMatch = /\bconst\s+LANG_OPTIONS\s*=\s*\[/.exec(appSrc);
-  assert.ok(langMatch, "could not locate LANG_OPTIONS in ui/app.js");
-  const langSpan = findBalancedBlock(appSrc, langMatch.index + langMatch[0].length - 1, "[", "]");
-  assert.ok(appSrc.slice(langSpan.start, langSpan.end).includes("简体中文"));
+  assert.equal(
+    findImportCycle(importsByFile),
+    null,
+    "ui/*.js module graph must be acyclic",
+  );
 
-  const i18nMatch = /\bconst\s+I18N\s*=\s*\{/.exec(appSrc);
-  assert.ok(i18nMatch, "could not locate I18N in ui/app.js");
-  const i18nSpan = findBalancedBlock(appSrc, i18nMatch.index + i18nMatch[0].length - 1, "{", "}");
-  const i18nBody = appSrc.slice(i18nSpan.start, i18nSpan.end);
+  for (const leaf of ["ui/band.js", "ui/mock.js", "ui/i18n.js"]) {
+    assert.deepEqual(
+      importsByFile.get(leaf),
+      [],
+      `${leaf} must remain a pure zero-import leaf module`,
+    );
+  }
+  assert.deepEqual(
+    [...(importsByFile.get("ui/app.js") || [])].sort(),
+    ["ui/band.js", "ui/i18n.js", "ui/mock.js"],
+    "ui/app.js must form a strict 1-way DAG to {band.js, i18n.js, mock.js}",
+  );
 
-  const zhMatch = /\bzh\s*:\s*\{/.exec(i18nBody);
-  assert.ok(zhMatch, "could not locate I18N.zh in ui/app.js");
-  const zhOpenAbs = i18nSpan.start + zhMatch.index + zhMatch[0].length - 1;
-  const zhSpan = findBalancedBlock(appSrc, zhOpenAbs, "{", "}");
-  assert.ok(appSrc.slice(zhSpan.start, zhSpan.end).includes("navPlane"));
+  // Negative case: side-effect imports and circular imports must be detected.
+  const cyclicGraph = buildUiImportGraph([
+    { rel: "ui/a.js", src: 'import { x } from "./b.js";\nexport const a = x;' },
+    { rel: "ui/b.js", src: 'import "./a.js";\nexport const x = 1;' },
+  ]);
+  assert.deepEqual(cyclicGraph.get("ui/b.js"), ["ui/a.js"]);
+  assert.deepEqual(findImportCycle(cyclicGraph), ["ui/a.js", "ui/b.js", "ui/a.js"]);
 
-  // Confirm I18N.en is outside the masked zh span so CJK leaked into I18N.en is caught too.
-  const enMatch = /\ben\s*:\s*\{/.exec(i18nBody);
-  assert.ok(enMatch, "could not locate I18N.en in ui/app.js");
-  const enOpenAbs = i18nSpan.start + enMatch.index + enMatch[0].length - 1;
-  assert.ok(enOpenAbs >= zhSpan.end, "I18N.en must not fall inside the I18N.zh exemption span");
+  // 2. Direct unit checks for ui/band.js
+  assert.equal(bandModule.BAND_JOIN_PX, 2.5);
+  assert.equal(bandModule.BAND_EASE_PX, 5.0);
+  assert.deepEqual(bandModule.bandProfile([]), []);
 
-  let masked = maskRangePreservingNewlines(appSrc, langSpan.start, langSpan.end);
-  masked = maskRangePreservingNewlines(masked, zhSpan.start, zhSpan.end);
+  // Same session with overlapping bursts must not double-count itself.
+  const singleOverlap = bandModule.bandProfile([
+    [
+      [10, 40],
+      [20, 60],
+    ],
+  ]);
+  assert.equal(singleOverlap.length, 1);
+  assert.equal(singleOverlap[0].length, 1);
+  assert.equal(singleOverlap[0][0][2], 2.5);
 
+  // Two distinct concurrent sessions swell from 2.5 -> 3.5 -> 2.5 and render a smooth closed path.
+  const concurrent = bandModule.bandProfile([[[10, 100]], [[35, 75]]]);
+  assert.equal(concurrent.length, 1);
+  assert.deepEqual(
+    concurrent[0].map((seg) => seg[2]),
+    [2.5, 3.5, 2.5],
+  );
+  const smoothPath = bandModule.bandPath(concurrent[0], 14);
+  assert.ok(smoothPath.startsWith("M") && smoothPath.endsWith("Z"));
+  assert.ok(smoothPath.includes("A"), "bandPath must include semicircular end caps");
+
+  // Sub-lane stays at uniform 2.0 half-thickness even with overlap.
+  const subLane = bandModule.bandProfile([[[10, 80]], [[20, 60]]], true);
+  assert.equal(subLane.length, 1);
+  assert.equal(subLane[0].length, 1);
+  assert.equal(subLane[0][0][2], 2.0);
+  const capsule = bandModule.bandPath(subLane[0], 10);
+  assert.ok(capsule.startsWith("M") && capsule.endsWith("Z"));
+
+  // Narrow sub-BAND_JOIN_PX gap between two distinct sessions is bridged without a zero waist.
+  const bridged = bandModule.bandProfile([[[10, 30]], [[31.5, 50]]]);
+  assert.equal(bridged.length, 1);
+  assert.equal(bridged[0].length, 1);
+
+  // 3. Direct unit checks for ui/mock.js
+  assert.ok(mockModule.DEFAULT_MOCK_CONTRIBUTIONS.length >= 140);
+  assert.equal(mockModule.DEFAULT_MOCK_CONTRIBUTIONS[0].weekday, 0);
+  assert.equal(mockModule.DEFAULT_MOCK_CONTRIBUTIONS.at(-1).date, "2026-11-14");
+  assert.deepEqual(mockModule.buildMockContributions(), mockModule.DEFAULT_MOCK_CONTRIBUTIONS);
+  assert.deepEqual(
+    mockModule.DEFAULT_MOCK_HARNESSES.map((h) => h.id),
+    ["antigravity", "claude", "codex", "dsh"],
+  );
+
+  const customPalette = ["#111111", "#222222", "#333333", "#444444", "#555555", "#666666"];
+  const planeA = mockModule.createMockPlane(customPalette);
+  const planeB = mockModule.createMockPlane(customPalette);
+  assert.equal(planeA.days.length, 7);
+  assert.equal(planeA.archivedCount, 11);
+  assert.equal(planeA.lines[0].color, "#111111");
+  assert.equal(planeA.lines[4].color, "#555555");
+  assert.equal(planeA.unsummarized.length, 2);
+  assert.equal(planeA.shortSessions.items.length, 4);
+
+  // Mutating planeA must never leak into planeB or exported defaults.
+  planeA.days[0].full = "MUTATED";
+  planeA.lines[0].name = "MUTATED";
+  planeA.lines[0].sessions.pop();
+  planeA.unsummarized.pop();
+  planeA.shortSessions.items.pop();
+  planeA.contributions[0].totalMinutes = 999999;
+  planeA.harnesses[0].enabled = false;
+
+  assert.notEqual(planeB.days[0].full, "MUTATED");
+  assert.equal(planeB.lines[0].name, "sqlite-sync");
+  assert.equal(planeB.lines[0].sessions.length, 3);
+  assert.equal(planeB.unsummarized.length, 2);
+  assert.equal(planeB.shortSessions.items.length, 4);
+  assert.notEqual(planeB.contributions[0].totalMinutes, 999999);
+  assert.notEqual(mockModule.DEFAULT_MOCK_CONTRIBUTIONS[0].totalMinutes, 999999);
+  assert.equal(planeB.harnesses[0].enabled, true);
+  assert.equal(mockModule.DEFAULT_MOCK_HARNESSES[0].enabled, true);
+
+  // 4. Direct unit checks for ui/i18n.js
+  assert.deepEqual(
+    i18nModule.LANG_OPTIONS.map((o) => o.id),
+    ["zh", "en"],
+  );
+  const dict = i18nModule.createI18n({
+    cliAutoOrderText: "agy → codex → dsh → claude",
+    apiModelExamples: ["model-a", "model-b", "model-c"],
+  });
+  assert.equal(dict.zh.cliAutoOrderMeta, "agy → codex → dsh → claude");
+  assert.equal(dict.en.cliAutoOrderMeta, "agy → codex → dsh → claude");
+  assert.ok(dict.zh.descCliHarness.includes("agy → codex → dsh → claude"));
+  assert.ok(dict.en.descCliHarness.includes("agy → codex → dsh → claude"));
+  assert.ok(dict.zh.descApiModel.includes("model-a、model-b、model-c"));
+  assert.ok(dict.en.descApiModel.includes("model-a, model-b, model-c"));
+  assert.deepEqual(Object.keys(dict.zh).sort(), Object.keys(dict.en).sort());
+});
+
+test("all ui/*.js modules contain no CJK characters outside LANG_OPTIONS and I18N.zh in ui/i18n.js", () => {
+  const uiJsFiles = collectUiJsFiles();
   const cjkRe = /[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
   const violations = [];
-  const lines = masked.split("\n");
-  for (let idx = 0; idx < lines.length; idx += 1) {
-    if (cjkRe.test(lines[idx])) {
-      violations.push(`ui/app.js:${idx + 1}: ${lines[idx].trim()}`);
+  let checkedI18n = false;
+
+  for (const { abs, rel } of uiJsFiles) {
+    const src = readFileSync(abs, "utf8");
+    let scannable = src;
+
+    if (rel === "ui/i18n.js") {
+      checkedI18n = true;
+      const langMatch = /\bexport\s+const\s+LANG_OPTIONS\s*=\s*\[/.exec(src);
+      assert.ok(langMatch, "could not locate LANG_OPTIONS in ui/i18n.js");
+      const langSpan = findBalancedBlock(src, langMatch.index + langMatch[0].length - 1, "[", "]");
+      assert.ok(src.slice(langSpan.start, langSpan.end).includes("简体中文"));
+
+      const fnMatch = /\bexport\s+function\s+createI18n\b[\s\S]*?\breturn\s*\{/.exec(src);
+      assert.ok(fnMatch, "could not locate createI18n return dictionary in ui/i18n.js");
+      const dictSpan = findBalancedBlock(src, fnMatch.index + fnMatch[0].length - 1, "{", "}");
+      const dictBody = src.slice(dictSpan.start, dictSpan.end);
+
+      const zhMatch = /\bzh\s*:\s*\{/.exec(dictBody);
+      assert.ok(zhMatch, "could not locate zh dictionary block in ui/i18n.js");
+      const zhOpenAbs = dictSpan.start + zhMatch.index + zhMatch[0].length - 1;
+      const zhSpan = findBalancedBlock(src, zhOpenAbs, "{", "}");
+      assert.ok(src.slice(zhSpan.start, zhSpan.end).includes("navPlane"));
+
+      // Confirm en is strictly outside the masked zh span so CJK leaked into en is caught too.
+      const enMatch = /\ben\s*:\s*\{/.exec(dictBody);
+      assert.ok(enMatch, "could not locate en dictionary block in ui/i18n.js");
+      const enOpenAbs = dictSpan.start + enMatch.index + enMatch[0].length - 1;
+      const enSpan = findBalancedBlock(src, enOpenAbs, "{", "}");
+      assert.ok(enOpenAbs >= zhSpan.end, "en block must not fall inside the zh exemption span");
+      assert.ok(src.slice(enSpan.start, enSpan.end).includes("navPlane"));
+
+      scannable = maskRangePreservingNewlines(scannable, langSpan.start, langSpan.end);
+      scannable = maskRangePreservingNewlines(scannable, zhSpan.start, zhSpan.end);
+    }
+
+    const lines = scannable.split("\n");
+    for (let idx = 0; idx < lines.length; idx += 1) {
+      if (cjkRe.test(lines[idx])) {
+        violations.push(`${rel}:${idx + 1}: ${lines[idx].trim()}`);
+      }
     }
   }
+
+  assert.equal(checkedI18n, true, "expected ui/i18n.js to be present during CJK scan");
   assert.deepEqual(
     violations,
     [],
-    `Found CJK character(s) outside LANG_OPTIONS and I18N.zh:\n${violations.join("\n")}`,
+    `Found CJK character(s) outside LANG_OPTIONS and zh dictionary in ui/i18n.js:\n${violations.join("\n")}`,
   );
 });
 

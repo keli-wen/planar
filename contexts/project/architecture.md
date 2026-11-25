@@ -36,7 +36,10 @@ planar/
 │   ├── defaults.json           # Cross-surface declarative SSOT (API providers, defaultSettings, Light/Dark palettes, harness/CLI order)
 │   ├── index.html              # Single-page shell
 │   ├── styles.css              # Light/Dark tokens, @container narrow sidebar breakpoints, animations
-│   └── app.js                  # State store (loads ./defaults.json), SVG bandProfile/bandPath renderer, RECAP card, DnD deps, Settings
+│   ├── band.js                 # Pure zero-DOM leaf: continuous C1 SVG band geometry (`bandProfile`, `bandPath`)
+│   ├── i18n.js                 # Pure zero-DOM leaf: `LANG_OPTIONS` and `createI18n(...)` bilingual `zh`/`en` dictionary
+│   ├── mock.js                 # Pure zero-DOM leaf: clean-room `?mock=1` plane, contribution, and harness fixtures
+│   └── app.js                  # Entry ES module: loads `./defaults.json`, state, SSE sync, DOM renderers, RECAP, DnD deps, Settings
 ├── skills/planar/SKILL.md      # Shipped user-facing planning skill (L0 -> L1 -> L2)
 └── scripts/                    # Zero-dependency preview, hygiene checker, and agent hook guards
 ```
@@ -109,7 +112,7 @@ Default loopback address: `http://127.0.0.1:4310` (`Planar.app` falls back to an
 
 | Method & Route | Description |
 | :--- | :--- |
-| `GET /` → `GET /ui/` | Zero-fork frontend (disk `./ui` in dev, `include_str!` embedded in `Planar.app` / installed `planar` binary) |
+| `GET /` → `GET /ui/` | Zero-fork 4-module native ESM frontend (`app.js → { band.js, i18n.js, mock.js }` + `index.html`, `styles.css`, `defaults.json`). Disk `build_router` serves `./ui` via `ServeDir` with `Cache-Control: no-store, no-cache, must-revalidate, max-age=0`; `build_embedded_router` registers every shippable file from one static `EMBEDDED_UI_ASSETS` `include_str!` table (reusing `DEFAULTS_JSON`) with the same `no-store` header. A filesystem-to-router unit test in `server.rs` enumerates real `ui/` files on disk and asserts byte-for-byte, MIME, and `no-store` parity across both routers. |
 | `GET /api/health` | Loopback readiness check (`{"ok": true}`) |
 | `GET /api/plane?days=7&date=YYYY-MM-DD&rescan=0\|1&lite=0\|1` | Complete `PlaneResponse` (throttled `3s` auto-scan unless `rescan=1`), 20-week contributions, harness statuses; `lite=1` omits contributions/harnesses/`source_path` disk stats for fast mid-Sync refreshes |
 | `POST /api/scan` | Force immediate incremental scan and return refreshed `PlaneResponse` |
