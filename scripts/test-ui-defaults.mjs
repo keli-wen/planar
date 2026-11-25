@@ -119,9 +119,8 @@ globalThis.document = {
   addEventListener() {},
 };
 
-const { applyPlaneResponse, DEFAULT_SETTINGS, isProcessorConfigured, state } = await import(
-  "../ui/app.js"
-);
+const { applyPlaneResponse, DEFAULT_SETTINGS, isProcessorConfigured, renderSettingsView, state } =
+  await import("../ui/app.js");
 
 function makePlanePayload(settings) {
   return {
@@ -185,7 +184,11 @@ test("applyPlaneResponse preserves saved apiModel override even when apiProvider
 test("applyPlaneResponse uses catalog defaults only when apiProvider or apiModel is omitted", () => {
   const defaultProvider = DEFAULTS_JSON.defaultSettings.apiProvider;
   const defaultProviderSpec = DEFAULTS_JSON.apiProviders.find((p) => p.id === defaultProvider);
+  const openrouterSpec = DEFAULTS_JSON.apiProviders.find((p) => p.id === "openrouter");
   const deepseekSpec = DEFAULTS_JSON.apiProviders.find((p) => p.id === "deepseek");
+
+  assert.equal(defaultProviderSpec.defaultModel, "gemini-4-hydrogen");
+  assert.equal(openrouterSpec.defaultModel, "google/gemini-4-hydrogen");
 
   applyPlaneResponse(
     makePlanePayload({
@@ -196,6 +199,17 @@ test("applyPlaneResponse uses catalog defaults only when apiProvider or apiModel
   assert.equal(state.settings.apiProvider, DEFAULT_SETTINGS.apiProvider);
   assert.equal(state.settings.apiModel, defaultProviderSpec.defaultModel);
   assert.equal(isProcessorConfigured(state.settings), true);
+
+  applyPlaneResponse(
+    makePlanePayload({
+      processorConfigured: true,
+      processorMode: "api",
+      apiProvider: "gemini",
+      apiModel: "gemini-2.5-flash-lite",
+    }),
+  );
+  assert.equal(state.settings.apiProvider, "gemini");
+  assert.equal(state.settings.apiModel, "gemini-2.5-flash-lite");
 
   applyPlaneResponse(
     makePlanePayload({
@@ -229,4 +243,58 @@ test("applyPlaneResponse uses catalog defaults only when apiProvider or apiModel
   );
   assert.equal(state.settings.apiProvider, "deepseek");
   assert.equal(state.settings.apiModel, "");
+});
+
+test("Settings processor view renders bilingual Gemini model placeholder and fast-tier hint", () => {
+  state.settingsTab = "processor";
+
+  for (const [language, expectedSnippet] of [
+    ["zh", "默认 gemini-4-hydrogen；追求极速与最低成本可选 gemini-3.5-flash-lite。"],
+    [
+      "en",
+      "Defaults to gemini-4-hydrogen; use gemini-3.5-flash-lite for ultra-fast, lowest-cost runs.",
+    ],
+  ]) {
+    applyPlaneResponse(
+      makePlanePayload({
+        language,
+        processorConfigured: true,
+        processorMode: "api",
+        apiProvider: "gemini",
+      }),
+    );
+    const html = renderSettingsView();
+    assert.ok(
+      html.includes('placeholder="gemini-4-hydrogen"'),
+      `${language} Gemini input placeholder should be gemini-4-hydrogen`,
+    );
+    assert.ok(
+      html.includes(expectedSnippet),
+      `${language} Gemini helper hint missing expected copy`,
+    );
+  }
+
+  applyPlaneResponse(
+    makePlanePayload({
+      language: "en",
+      processorConfigured: true,
+      processorMode: "api",
+      apiProvider: "openrouter",
+    }),
+  );
+  const orHtml = renderSettingsView();
+  assert.ok(orHtml.includes('placeholder="google/gemini-4-hydrogen"'));
+  assert.ok(orHtml.includes("google/gemini-3.5-flash-lite"));
+
+  applyPlaneResponse(
+    makePlanePayload({
+      language: "en",
+      processorConfigured: true,
+      processorMode: "api",
+      apiProvider: "deepseek",
+    }),
+  );
+  const dsHtml = renderSettingsView();
+  assert.ok(dsHtml.includes('placeholder="deepseek-chat"'));
+  assert.ok(!dsHtml.includes("gemini-3.5-flash-lite"));
 });
