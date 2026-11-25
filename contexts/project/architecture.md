@@ -15,7 +15,7 @@ planar/
 │   ├── error.rs                # PlanarError (thiserror) & Result<T>
 │   ├── env.rs                  # Harness log roots, login-shell PATH hydration, CLI binary & resume-cmd helpers
 │   ├── burst.rs                # Clamped burst union (IDLE_GAP_CAP_MS = 12m, MIN_BURST_MS = 60s) & day projection
-│   ├── pricing.rs              # Offline model list-price table & compact token/cost formatting
+│   ├── pricing.rs              # `genai-prices` offline pricing engine, optional cache loader & compact token/cost formatting
 │   ├── ingest/
 │   │   ├── mod.rs              # Byte-cursor incremental JSONL streamer, ScanDecision, delegation-envelope stripper
 │   │   ├── claude.rs           # ~/.claude/projects/**/*.jsonl (streaming usage dedup + subagents/)
@@ -71,10 +71,11 @@ flowchart LR
    - Sessions with an existing digest whose `source_path` no longer exists on disk are **permanently locked**.
 2. `slice_trajectory_file` streams the source JSONL read-only, skips tool payloads and `[PLANAR_INTERNAL_DIGEST]` echoes, and extracts `head`, `middle_users`, and `tail`.
 3. Candidates are chunked by `sync_batch_limit` (default `4`, capped at `72,000` chars per prompt) and dispatched to either:
-   - **Local CLI mode** (`agy`, `codex`, `dsh`, or `claude` in stateless/read-only print mode with `cliEngineOrder = ["antigravity", "codex", "dsh", "claude"]` from `ui/defaults.json`), or
-   - **Direct API mode** (`gemini`, `anthropic`, `openai`, `deepseek`, `openrouter`, `xai`, `groq`, `mistral`, `siliconflow`, `moonshot`, `ollama`, or `openai-compatible`). For `gemini` (default `gemini-4-hydrogen`), `call_gemini_api` dispatches model-aware `generationConfig` while always preserving `responseMimeType: "application/json"`: `thinkingConfig.thinkingLevel = "low"` (omitting `temperature`) for `gemini-4-*` and `gemini-3.8-flash`, `"minimal"` for `gemini-3.5-flash-lite` / `gemini-3.1-flash-lite` / `gemini-3.6-flash` (omitting `temperature`) / `gemini-3-flash-*`, `"low"` for `gemini-3.1-pro-*` / `gemini-3-pro-*`, and legacy `temperature = 0.2` without `thinkingConfig` for `gemini-2.5-*` and earlier.
-4. `apply_session_digest` updates `session_digests` + `sessions_fts`, and assigns `line_id` **only when** `line_id IS NULL` or the current Line is unpinned (`pinned = 0`).
-5. `regroup_discovered_lines` clusters only sessions inside unpinned non-system Lines (`pinned = 0 AND is_system_bucket = 0`), passing pinned Lines + `Scope:` descriptions as exemplars, and prunes newly empty unpinned Lines.
+   - **Local CLI mode** (`agy`, `codex`, `dsh`, or `claude` in stateless/read-only print mode with `cliEngineOrder = ["antigravity", "codex", "dsh", "claude"]` from `ui/defaults.json`; honestly tagged `isLocalCli: true` with no fabricated API cost), or
+   - **Direct API mode** (`gemini`, `anthropic`, `openai`, `deepseek`, `openrouter`, `xai`, `groq`, `mistral`, `siliconflow`, `moonshot`, `ollama`, or `openai-compatible`), parsing actual token usage (`usageMetadata` / `usage`) and computing USD spend offline via `genai-prices` (`crates/planar-core/src/pricing.rs`, with optional cached refresh from `REMOTE_DATA_URL` to `~/.planar/pricing-cache.json` and automatic bundled fallback). For `gemini` (default `gemini-4-hydrogen`), `call_gemini_api` dispatches model-aware `generationConfig` while always preserving `responseMimeType: "application/json"`: `thinkingConfig.thinkingLevel = "low"` (omitting `temperature`) for `gemini-4-*` and `gemini-3.8-flash`, `"minimal"` for `gemini-3.5-flash-lite` / `gemini-3.1-flash-lite` / `gemini-3.6-flash` (omitting `temperature`) / `gemini-3-flash-*`, `"low"` for `gemini-3.1-pro-*` / `gemini-3-pro-*`, and legacy `temperature = 0.2` without `thinkingConfig` for `gemini-2.5-*` and earlier.
+4. `estimate_sync_cost` (`GET /api/sync/estimate` and `planar sync --estimate`) slices pending candidates strictly read-only, estimates ASCII/CJK input tokens (`~4 chars/tok` ASCII, `~1.6 chars/tok` CJK) plus model-aware output/thinking budgets, and computes an offline USD cost range without calling any LLM or mutating SQLite.
+5. `apply_session_digest` updates `session_digests` + `sessions_fts`, and assigns `line_id` **only when** `line_id IS NULL` or the current Line is unpinned (`pinned = 0`).
+6. `regroup_discovered_lines` clusters only sessions inside unpinned non-system Lines (`pinned = 0 AND is_system_bucket = 0`), passing pinned Lines + `Scope:` descriptions as exemplars, and prunes newly empty unpinned Lines.
 
 ---
 
@@ -112,8 +113,9 @@ Default loopback address: `http://127.0.0.1:4310` (`Planar.app` falls back to an
 | `GET /api/health` | Loopback readiness check (`{"ok": true}`) |
 | `GET /api/plane?days=7&date=YYYY-MM-DD&rescan=0\|1` | Complete `PlaneResponse` (throttled `3s` auto-scan unless `rescan=1`), 20-week contributions, harness statuses |
 | `POST /api/scan` | Force immediate incremental scan and return refreshed `PlaneResponse` |
-| `POST /api/sync` | Synchronous scoped `Sync` batch (`days`, `date`, `harness`, `force`, `limit`) |
-| `POST /api/sync/stream` | Streaming NDJSON `Sync` (`start`, `batchStart`, `heartbeat`, `batchDone`, `complete`) used by `./ui` and `planar sync` |
+| `POST /api/sync` | Synchronous scoped `Sync` batch (`days`, `date`, `harness`, `force`, `limit`) with actual API token/USD `usage` |
+| `GET /api/sync/estimate` | Read-only pre-flight `Sync` cost & token estimate (`days`, `date`, `harness`, `force`, `limit`) without calling any LLM |
+| `POST /api/sync/stream` | Streaming NDJSON `Sync` (`start`, `batchStart`, `heartbeat`, `batchDone`, `complete`) with per-batch & cumulative `usage`, used by `./ui` and `planar sync` |
 | `POST /api/regroup` | Re-cluster sessions inside unpinned Lines |
 | `POST /api/processor/test` | Verify CLI or API processor connectivity and measure latency |
 | `PUT /api/settings` | Validate and persist `AppSettings` |
@@ -141,7 +143,7 @@ Both `planar` CLI (`crates/planar-cli/src/main.rs`) and MCP (`crates/planar-core
 | **Guided Planning Rubric** | *(via Skill)* | `prompts/get` → `planar-plan` | Yes |
 | **Jump Back to Session** | `planar open <id> [--print] [--json] [--no-scan]` | *(Resume command embedded in L2 output)* | Yes |
 | **Log Scan** | `planar scan [--json]` | *(Auto-throttled `3s` on MCP calls)* | Local DB |
-| **End-of-Day Summarization** | `planar sync [--days 7] [--date YYYY-MM-DD] [--harness <id>] [--limit <n>] [--force] [--no-scan] [--json]` | *Excluded from MCP v1 by design* | Writes digests |
+| **End-of-Day Summarization** | `planar sync [--days 7] [--date YYYY-MM-DD] [--harness <id>] [--limit <n>] [--force] [--estimate] [--no-scan] [--json]` | *Excluded from MCP v1 by design* | Writes digests (`--estimate` is read-only) |
 | **Unpinned Re-Clustering** | `planar regroup [--json]` | *Excluded from MCP v1 by design* | Writes unpinned Lines |
 | **MCP Stdio / Config** | `planar mcp` / `planar mcp config` | Stdio JSON-RPC `2025-03-26` | Yes |
 | **Local Daemon + UI** | `planar serve [--host 127.0.0.1] [--port 4310] [--ui-dir <path>]` | Hosts `POST /mcp` alongside `./ui` | Local daemon |
