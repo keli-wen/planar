@@ -29,9 +29,42 @@ use crate::model::{
 use crate::processor;
 
 const INDEX_HTML: &str = include_str!("../../../ui/index.html");
-const STYLES_CSS: &str = include_str!("../../../ui/styles.css");
-const APP_JS: &str = include_str!("../../../ui/app.js");
 const ICON_SVG: &str = include_str!("../../../assets/icon.svg");
+const UI_CACHE_CONTROL: &str = "no-store, no-cache, must-revalidate, max-age=0";
+
+const EMBEDDED_UI_ASSETS: &[(&str, &str, &str)] = &[
+    ("/ui/index.html", "text/html; charset=utf-8", INDEX_HTML),
+    (
+        "/ui/styles.css",
+        "text/css; charset=utf-8",
+        include_str!("../../../ui/styles.css"),
+    ),
+    (
+        "/ui/app.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/app.js"),
+    ),
+    (
+        "/ui/band.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/band.js"),
+    ),
+    (
+        "/ui/i18n.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/i18n.js"),
+    ),
+    (
+        "/ui/mock.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/mock.js"),
+    ),
+    (
+        "/ui/defaults.json",
+        "application/json; charset=utf-8",
+        DEFAULTS_JSON,
+    ),
+];
 
 const PENDING_STOP_TTL: Duration = Duration::from_secs(300);
 const MAX_PENDING_STOPS: usize = 64;
@@ -388,22 +421,31 @@ fn static_asset(content_type: &'static str, body: &'static str) -> Response {
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, content_type),
-            (
-                header::CACHE_CONTROL,
-                "no-store, no-cache, must-revalidate, max-age=0",
-            ),
+            (header::CACHE_CONTROL, UI_CACHE_CONTROL),
         ],
         body,
     )
         .into_response()
 }
 
+fn attach_ui_no_store(mut response: Response) -> std::future::Ready<Response> {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static(UI_CACHE_CONTROL),
+    );
+    std::future::ready(response)
+}
+
 /// Builds the Axum router serving `./ui`, `./assets`, `/mcp`, and `/api/*` from disk.
 pub fn build_router(state: AppState, ui_dir: &Path, assets_dir: &Path) -> Router {
+    let ui_routes = Router::new()
+        .nest_service("/ui", ServeDir::new(ui_dir))
+        .layer(axum::middleware::map_response(attach_ui_no_store));
+
     Router::new()
         .route("/", get(|| async { Redirect::temporary("/ui/") }))
         .route("/mcp", post(post_mcp_handler).with_state(state.clone()))
-        .nest_service("/ui", ServeDir::new(ui_dir))
+        .merge(ui_routes)
         .nest_service("/assets", ServeDir::new(assets_dir))
         .nest("/api", build_api_router(state))
         .layer(CorsLayer::permissive())
@@ -411,7 +453,7 @@ pub fn build_router(state: AppState, ui_dir: &Path, assets_dir: &Path) -> Router
 
 /// Builds a standalone Axum router with `./ui`, `./assets/icon.svg`, and `/mcp` embedded in the binary.
 pub fn build_embedded_router(state: AppState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/", get(|| async { Redirect::temporary("/ui/") }))
         .route("/mcp", post(post_mcp_handler).with_state(state.clone()))
         .route("/ui", get(|| async { Redirect::temporary("/ui/") }))
@@ -420,25 +462,18 @@ pub fn build_embedded_router(state: AppState) -> Router {
             get(|| async { static_asset("text/html; charset=utf-8", INDEX_HTML) }),
         )
         .route(
-            "/ui/index.html",
-            get(|| async { static_asset("text/html; charset=utf-8", INDEX_HTML) }),
-        )
-        .route(
-            "/ui/styles.css",
-            get(|| async { static_asset("text/css; charset=utf-8", STYLES_CSS) }),
-        )
-        .route(
-            "/ui/app.js",
-            get(|| async { static_asset("application/javascript; charset=utf-8", APP_JS) }),
-        )
-        .route(
-            "/ui/defaults.json",
-            get(|| async { static_asset("application/json; charset=utf-8", DEFAULTS_JSON) }),
-        )
-        .route(
             "/assets/icon.svg",
             get(|| async { static_asset("image/svg+xml", ICON_SVG) }),
-        )
+        );
+
+    for &(url_path, content_type, body) in EMBEDDED_UI_ASSETS {
+        router = router.route(
+            url_path,
+            get(move || async move { static_asset(content_type, body) }),
+        );
+    }
+
+    router
         .nest("/api", build_api_router(state))
         .layer(CorsLayer::permissive())
 }
@@ -1500,5 +1535,192 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(bad_resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    fn mime_essence(value: &header::HeaderValue) -> &str {
+        value
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+    }
+
+    async fn assert_ok_asset(
+        router: &Router,
+        label: &str,
+        uri: &str,
+        expected_bytes: &[u8],
+        expected_cache_control: Option<&str>,
+    ) -> header::HeaderValue {
+        let res = router
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{label} router missing {uri}");
+        let content_type = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap_or_else(|| panic!("{label} router missing Content-Type for {uri}"))
+            .clone();
+        if let Some(expected_cc) = expected_cache_control {
+            assert_eq!(
+                res.headers()
+                    .get(header::CACHE_CONTROL)
+                    .unwrap_or_else(|| panic!("{label} router missing Cache-Control for {uri}")),
+                expected_cc,
+                "{label} router Cache-Control mismatch for {uri}"
+            );
+        }
+        let body = to_bytes(res.into_body(), 2 * 1024 * 1024).await.unwrap();
+        assert_eq!(
+            body.as_ref(),
+            expected_bytes,
+            "{label} router body drifted from disk for {uri}"
+        );
+        content_type
+    }
+
+    #[tokio::test]
+    async fn embedded_and_disk_routers_match_all_shippable_ui_files() {
+        const EXPECTED_UI_CACHE_CONTROL: &str = "no-store, no-cache, must-revalidate, max-age=0";
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let real_ui_dir = repo_root.join("ui");
+        let real_assets_dir = repo_root.join("assets");
+
+        let mut disk_ui_files: Vec<(String, PathBuf)> = Vec::new();
+        for entry in walkdir::WalkDir::new(&real_ui_dir)
+            .into_iter()
+            .filter_entry(|e| {
+                e.depth() == 0
+                    || !e
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with('.'))
+            })
+        {
+            let entry = entry.unwrap();
+            if entry.file_type().is_file() {
+                let rel = entry
+                    .path()
+                    .strip_prefix(&real_ui_dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                disk_ui_files.push((format!("/ui/{rel}"), entry.into_path()));
+            }
+        }
+        disk_ui_files.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert!(
+            !disk_ui_files.is_empty(),
+            "expected shippable files in {}",
+            real_ui_dir.display()
+        );
+
+        let disk_urls: std::collections::BTreeSet<&str> =
+            disk_ui_files.iter().map(|(url, _)| url.as_str()).collect();
+        let mut embedded_urls = std::collections::BTreeSet::new();
+        for &(url_path, _, _) in EMBEDDED_UI_ASSETS {
+            assert!(
+                embedded_urls.insert(url_path),
+                "duplicate entry `{url_path}` in EMBEDDED_UI_ASSETS"
+            );
+        }
+        assert_eq!(
+            embedded_urls, disk_urls,
+            "EMBEDDED_UI_ASSETS must match every shippable file under ui/ (no missing or orphaned entries)"
+        );
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("planar.db");
+        Store::open(&db_path).unwrap();
+        let state = AppState::new(db_path, test_roots(dir.path()));
+        let embedded_app = build_embedded_router(state.clone());
+        let disk_app = build_router(state, &real_ui_dir, &real_assets_dir);
+
+        let ui_redirect_res = embedded_app
+            .clone()
+            .oneshot(Request::builder().uri("/ui").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            ui_redirect_res.status(),
+            StatusCode::TEMPORARY_REDIRECT,
+            "embedded router `/ui` should redirect to `/ui/`"
+        );
+        assert_eq!(
+            ui_redirect_res.headers().get(header::LOCATION).unwrap(),
+            "/ui/"
+        );
+
+        let index_disk_bytes = fs::read(real_ui_dir.join("index.html")).unwrap();
+        let icon_disk_bytes = fs::read(real_assets_dir.join("icon.svg")).unwrap();
+
+        for (label, router) in [("embedded", &embedded_app), ("disk", &disk_app)] {
+            let root_res = router
+                .clone()
+                .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                root_res.status(),
+                StatusCode::TEMPORARY_REDIRECT,
+                "{label} router `/` should redirect to `/ui/`"
+            );
+            assert_eq!(root_res.headers().get(header::LOCATION).unwrap(), "/ui/");
+
+            let index_ct = assert_ok_asset(
+                router,
+                label,
+                "/ui/",
+                &index_disk_bytes,
+                Some(EXPECTED_UI_CACHE_CONTROL),
+            )
+            .await;
+            assert_eq!(
+                mime_essence(&index_ct),
+                "text/html",
+                "{label} `/ui/` must have text/html Content-Type"
+            );
+
+            let icon_ct =
+                assert_ok_asset(router, label, "/assets/icon.svg", &icon_disk_bytes, None).await;
+            assert_eq!(
+                mime_essence(&icon_ct),
+                "image/svg+xml",
+                "{label} `/assets/icon.svg` MIME mismatch"
+            );
+        }
+
+        for (url_path, abs_path) in &disk_ui_files {
+            let expected_bytes = fs::read(abs_path).unwrap();
+            let embedded_ct = assert_ok_asset(
+                &embedded_app,
+                "embedded",
+                url_path,
+                &expected_bytes,
+                Some(EXPECTED_UI_CACHE_CONTROL),
+            )
+            .await;
+            let disk_ct = assert_ok_asset(
+                &disk_app,
+                "disk",
+                url_path,
+                &expected_bytes,
+                Some(EXPECTED_UI_CACHE_CONTROL),
+            )
+            .await;
+            assert_eq!(
+                mime_essence(&embedded_ct),
+                mime_essence(&disk_ct),
+                "Content-Type mismatch between embedded ({embedded_ct:?}) and disk ({disk_ct:?}) for {url_path}"
+            );
+        }
     }
 }

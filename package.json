@@ -16,7 +16,7 @@
     "app:install": "npm run app:build && rm -rf /Applications/Planar.app && cp -R target/release/bundle/macos/Planar.app /Applications/Planar.app && codesign --force --deep -s - /Applications/Planar.app",
     "app:open": "open -a /Applications/Planar.app",
     "hooks:install": "git config core.hooksPath .githooks",
-    "check:syntax": "node --check ui/app.js && node --check scripts/preview.mjs && node --check scripts/check-hygiene.mjs && node --check scripts/test-ui-defaults.mjs",
+    "check:syntax": "node ./scripts/check-syntax.mjs",
     "check:hygiene": "node ./scripts/check-hygiene.mjs",
     "lint:ui": "biome lint ui scripts && npm run check:syntax",
     "lint:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings",
