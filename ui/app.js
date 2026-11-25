@@ -98,8 +98,9 @@ const I18N = {
     syncTip: "对新轨迹执行首中尾切片摘要并归入工作线",
     syncBannerRunning: "正在执行首-中-尾切片归线 · 已完成 {done} / {total}",
     syncBannerBatched: "批量切片归线 · 第 {batch} / {batches} 批 · 已完成 {done} / {total}",
-    syncStopAfterBatch: "本批后停止",
-    syncStopping: "本批后停止（再点立即终止）",
+    syncParallelTag: "{n}× 并行",
+    syncStopAfterBatch: "当前批次后停止",
+    syncStopping: "等待在途批次完成（再点立即终止）",
     syncBatchActiveTag: "本批 {n} 条",
     syncBatchMore: "+{n} 条同批",
     syncFiledInto: "已归入 {line}",
@@ -229,6 +230,9 @@ const I18N = {
     descApiKey: "留空时自动尝试读取对应环境变量（如 DEEPSEEK_API_KEY）。",
     lblBatchLimit: "单批归纳会话上限",
     descBatchLimit: "控制每批处理会话数（1–50），大批量待归纳时将逐批更新平面。",
+    lblSyncConcurrency: "并发归纳批次数",
+    descSyncConcurrencyApi: "同时并行处理的批次数（1–16，默认 4）。",
+    descSyncConcurrencyCli: "本地 CLI 模式自动限制为 ≤ 2 并发，避免子进程过载。",
     lblSyncEstimate: "预计本次归纳",
     syncEstLoading: "估算中…",
     syncEstNone: "当前范围无待归纳会话",
@@ -344,8 +348,9 @@ const I18N = {
     syncTip: "Slice & summarize new trajectories into Lines",
     syncBannerRunning: "Slicing & filing trajectories · {done} / {total} completed",
     syncBannerBatched: "Batch slicing · Batch {batch} / {batches} · {done} / {total} completed",
-    syncStopAfterBatch: "Stop after batch",
-    syncStopping: "Stopping after batch (click to abort)…",
+    syncParallelTag: "{n}× parallel",
+    syncStopAfterBatch: "Stop after active",
+    syncStopping: "Draining active batches (click to abort)…",
     syncBatchActiveTag: "Batch ({n})",
     syncBatchMore: "+{n} in batch",
     syncFiledInto: "Filed → {line}",
@@ -475,6 +480,9 @@ const I18N = {
     descApiKey: "Leave empty to read standard environment variables (e.g. DEEPSEEK_API_KEY).",
     lblBatchLimit: "Max sessions per Sync batch",
     descBatchLimit: "Caps batch size (1–50); large backlogs update the plane progressively batch by batch.",
+    lblSyncConcurrency: "Concurrent Sync batches",
+    descSyncConcurrencyApi: "Batches run in parallel (1–16, default 4).",
+    descSyncConcurrencyCli: "Local CLI mode caps active subprocesses at 2.",
     lblSyncEstimate: "Next Sync estimate",
     syncEstLoading: "Estimating…",
     syncEstNone: "No pending sessions in scope",
@@ -722,8 +730,12 @@ const state = {
   syncFailedCount: 0,
   syncInitialPending: 0,
   syncBatchIndex: 0,
+  syncCompletedBatches: 0,
   syncTotalBatches: 0,
+  syncActiveBatches: new Map(),
   syncBatchItems: [],
+  syncRunId: null,
+  knownSourceExists: new Map(),
   syncLastFiled: null,
   syncUsage: null,
   syncEstimate: null,
@@ -3052,13 +3064,21 @@ function renderSyncProgressStrip() {
   const done = state.syncCompletedCount || state.syncProcessedTotal || 0;
   const total = Math.max(done, state.syncInitialPending || state.unsummarized.length || 1);
   const pct = Math.min(100, Math.max(0, Math.round((done / Math.max(1, total)) * 100)));
+  const activeBatchCount = state.syncActiveBatches instanceof Map ? state.syncActiveBatches.size : 0;
   const batchItems = Array.isArray(state.syncBatchItems) ? state.syncBatchItems : [];
   const leadActive = batchItems[0] || null;
   const extraInBatch = Math.max(0, batchItems.length - 1);
+  const currentBatchDisplay = Math.min(
+    Math.max(
+      state.syncBatchIndex || 1,
+      state.syncCompletedBatches + (activeBatchCount > 0 ? 1 : 0)
+    ),
+    Math.max(1, state.syncTotalBatches)
+  );
   const bannerLabel =
     state.syncTotalBatches > 0
       ? t("syncBannerBatched", {
-          batch: Math.min(state.syncBatchIndex || 1, state.syncTotalBatches),
+          batch: currentBatchDisplay,
           batches: state.syncTotalBatches,
           done,
           total,
@@ -3114,6 +3134,13 @@ function renderSyncProgressStrip() {
         <span class="sync-progress-text">
           ${slicerTriggerIconSvg()}
           <span>${escapeHtml(bannerLabel)}</span>
+          ${
+            activeBatchCount > 1
+              ? `<span class="sync-sub-chip">${escapeHtml(
+                  t("syncParallelTag", { n: activeBatchCount })
+                )}</span>`
+              : ""
+          }
           ${liveUsageBadge ? `<span class="sync-sub-chip">${escapeHtml(liveUsageBadge)}</span>` : ""}
           ${
             state.syncFailedCount > 0
@@ -4257,6 +4284,20 @@ function renderSettingsView(motionCls = "") {
           </div>
 
           <div class="settings-row">
+            <div class="settings-row-copy">
+              <div class="settings-row-title">${escapeHtml(t("lblSyncConcurrency"))}</div>
+              <div class="settings-row-sub">${escapeHtml(
+                isCli ? t("descSyncConcurrencyCli") : t("descSyncConcurrencyApi")
+              )}</div>
+            </div>
+            <div class="stepper">
+              <button type="button" data-action="step" data-field="syncConcurrency" data-delta="-1">−</button>
+              <span>${s.syncConcurrency || DEFAULT_SETTINGS.syncConcurrency}</span>
+              <button type="button" data-action="step" data-field="syncConcurrency" data-delta="1">+</button>
+            </div>
+          </div>
+
+          <div class="settings-row">
             <div class="settings-row-title">${escapeHtml(t("lblSyncEstimate"))}</div>
             ${renderSyncEstimateReadout()}
           </div>
@@ -5256,6 +5297,10 @@ function normalizePlaneSettings(rawSettings) {
     ...rawSettings,
     apiProvider: resolvedApiProvider,
     apiModel: resolvedApiModel,
+    syncConcurrency: Math.max(
+      1,
+      Math.min(16, Number(rawSettings.syncConcurrency) || DEFAULT_SETTINGS.syncConcurrency)
+    ),
     enabledHarnesses: {
       ...DEFAULT_SETTINGS.enabledHarnesses,
       ...(rawSettings.enabledHarnesses || {}),
@@ -5271,8 +5316,35 @@ function normalizePlaneSettings(rawSettings) {
   return normalizedSettings;
 }
 
-function applyPlaneResponse(data) {
+function syncKnownSourceExists(cache, lines, unsummarized, hydrate) {
+  const visit = (item) => {
+    if (!item?.id) return;
+    if (typeof item.sourceExists === "boolean") {
+      cache.set(item.id, item.sourceExists);
+    } else if (hydrate) {
+      item.sourceExists = cache.has(item.id) ? cache.get(item.id) : null;
+    }
+  };
+  for (const l of lines || []) {
+    for (const s of l.sessions || []) visit(s);
+  }
+  for (const u of unsummarized || []) visit(u);
+}
+
+function applyPlaneResponse(data, opts = {}) {
   if (!data || !Array.isArray(data.days)) return;
+  const isLite = Boolean(
+    opts.isLite ||
+      data.isLite ||
+      (!Array.isArray(data.contributions) && !Array.isArray(data.harnesses))
+  );
+  const knownSourceExists = state.knownSourceExists;
+  if (isLite) {
+    // Snapshot any checked booleans currently in state before replacing `lines`/`unsummarized`
+    // so Pending-to-Line moves retain their checked `sourceExists`.
+    syncKnownSourceExists(knownSourceExists, state.lines, state.unsummarized, false);
+  }
+
   const wasMock = state.dataSource === "mock";
   state.dataSource = "api";
   state.days = data.days;
@@ -5300,8 +5372,20 @@ function applyPlaneResponse(data) {
   const prevUnsummarizedSig = (state.unsummarized || [])
     .map((u) => `${u.id}:${u.steps || 0}:${u.userInputCount || 0}`)
     .join("|");
-  state.lines = Array.isArray(data.lines) ? data.lines : [];
-  state.unsummarized = Array.isArray(data.unsummarized) ? data.unsummarized : [];
+  const nextLines = Array.isArray(data.lines) ? data.lines : [];
+  let nextUnsummarized = Array.isArray(data.unsummarized) ? data.unsummarized : [];
+  if (isLite) {
+    syncKnownSourceExists(knownSourceExists, nextLines, nextUnsummarized, true);
+  } else {
+    // Full authoritative snapshot: replace the cache with fresh checked values.
+    knownSourceExists.clear();
+    syncKnownSourceExists(knownSourceExists, nextLines, nextUnsummarized, false);
+  }
+  if (opts.filedIds instanceof Set && opts.filedIds.size > 0) {
+    nextUnsummarized = nextUnsummarized.filter((u) => !opts.filedIds.has(u.id));
+  }
+  state.lines = nextLines;
+  state.unsummarized = nextUnsummarized;
   const nextUnsummarizedSig = state.unsummarized
     .map((u) => `${u.id}:${u.steps || 0}:${u.userInputCount || 0}`)
     .join("|");
@@ -5619,14 +5703,21 @@ async function runSyncBatches() {
   }
 
   const visiblePending = state.unsummarized.filter(matchesHarness);
+  const runId =
+    typeof globalThis.crypto?.randomUUID === "function"
+      ? globalThis.crypto.randomUUID()
+      : `sync-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   state.isSyncing = true;
   state.syncStopRequested = false;
+  state.syncRunId = runId;
   state.syncProcessedTotal = 0;
   state.syncCompletedCount = 0;
   state.syncFailedCount = 0;
   state.syncInitialPending = visiblePending.length;
   state.syncBatchIndex = 0;
+  state.syncCompletedBatches = 0;
   state.syncTotalBatches = 0;
+  state.syncActiveBatches = new Map();
   state.syncBatchItems = [];
   state.syncLastFiled = null;
   state.syncUsage = null;
@@ -5637,13 +5728,79 @@ async function runSyncBatches() {
   let backendUsed = state.settings.processorMode || DEFAULT_SETTINGS.processorMode;
   let lastErrorMsg = "";
   let stoppedByUser = false;
+  let abortedMidStream = false;
+  let liteRefreshTimer = 0;
+  let liteRefreshInFlight = false;
+  let liteRefreshEpoch = 0;
+  let lastLiteRefreshMs = 0;
+  let batchDoneSeq = 0;
+  const syncFiledIds = new Set();
+
+  const rebuildActiveBatchItems = () => {
+    const merged = [];
+    for (const items of state.syncActiveBatches.values()) {
+      for (const it of items) merged.push(it);
+    }
+    state.syncBatchItems = merged;
+  };
+
+  const cancelLiteRefresh = () => {
+    liteRefreshEpoch += 1;
+    if (liteRefreshTimer) {
+      clearTimeout(liteRefreshTimer);
+      liteRefreshTimer = 0;
+    }
+  };
+
+  const runLitePlaneRefresh = async () => {
+    if (liteRefreshInFlight || !state.isSyncing) return;
+    const myEpoch = liteRefreshEpoch;
+    const startedAtBatchSeq = batchDoneSeq;
+    liteRefreshInFlight = true;
+    lastLiteRefreshMs = Date.now();
+    try {
+      const liteRes = await fetch(`/api/plane?${apiQuerySuffix()}&rescan=0&lite=1`, {
+        signal: ctrl.signal,
+      });
+      if (!liteRes.ok || myEpoch !== liteRefreshEpoch || !state.isSyncing) return;
+      const liteData = await liteRes.json();
+      if (myEpoch !== liteRefreshEpoch || !state.isSyncing) return;
+      lastApiRefreshMs = Date.now();
+      // Reconcile against newer BatchDone events (never resurrect filed sessions)
+      // and preserve known `sourceExists` flags from prior full snapshots.
+      applyPlaneResponse(liteData, { isLite: true, filedIds: syncFiledIds });
+      render();
+    } catch {
+      // Non-fatal: final authoritative `complete` event refreshes the full plane.
+    } finally {
+      liteRefreshInFlight = false;
+      if (myEpoch === liteRefreshEpoch && state.isSyncing && batchDoneSeq > startedAtBatchSeq) {
+        scheduleLitePlaneRefresh();
+      }
+    }
+  };
+
+  const scheduleLitePlaneRefresh = () => {
+    if (!state.isSyncing || state.dataSource !== "api") return;
+    const elapsed = Date.now() - lastLiteRefreshMs;
+    if (elapsed >= 2000 && !liteRefreshInFlight) {
+      void runLitePlaneRefresh();
+    } else if (!liteRefreshTimer) {
+      const waitMs = Math.max(250, 2000 - elapsed);
+      liteRefreshTimer = setTimeout(() => {
+        liteRefreshTimer = 0;
+        void runLitePlaneRefresh();
+      }, waitMs);
+    }
+  };
+
   try {
     // Always invoke `/api/sync/stream` (which scans once on the backend) so grown
     // sessions and `slice_config_hash`-invalidated digests refresh even when the
     // unassigned `unsummarized` queue is empty.
     const syncSuffix = syncScopeQuerySuffix();
 
-    const res = await fetch(`/api/sync/stream?${syncSuffix}`, {
+    const res = await fetch(`/api/sync/stream?${syncSuffix}&runId=${encodeURIComponent(runId)}`, {
       method: "POST",
       signal: ctrl.signal,
     });
@@ -5661,35 +5818,42 @@ async function runSyncBatches() {
 
       const handleEventLine = (rawLine) => {
         const trimmed = rawLine.trim();
-        if (!trimmed) return false;
+        if (!trimmed) return;
         let evt = null;
         try {
           evt = JSON.parse(trimmed);
         } catch {
-          return false;
+          return;
         }
-        if (!evt || typeof evt !== "object") return false;
+        if (!evt || typeof evt !== "object") return;
 
         if (evt.type === "start") {
           state.syncInitialPending = typeof evt.total === "number" ? evt.total : state.syncInitialPending;
           state.syncTotalBatches = evt.totalBatches || 0;
           if (evt.backend) backendUsed = evt.backend;
           render();
-          return false;
+          return;
         }
         if (evt.type === "batchStart") {
-          state.syncBatchIndex = evt.batchIndex || 1;
+          const idx = evt.batchIndex || 1;
+          state.syncBatchIndex = Math.max(state.syncBatchIndex, idx);
           if (evt.totalBatches > 0) state.syncTotalBatches = evt.totalBatches;
-          state.syncBatchItems = Array.isArray(evt.items) ? evt.items : [];
+          state.syncActiveBatches.set(idx, Array.isArray(evt.items) ? evt.items : []);
+          rebuildActiveBatchItems();
           render();
-          return false;
+          return;
         }
         if (evt.type === "heartbeat") {
           lastApiRefreshMs = Date.now();
-          return false;
+          return;
         }
         if (evt.type === "batchDone") {
-          state.syncBatchItems = [];
+          batchDoneSeq += 1;
+          if (evt.batchIndex > 0) {
+            state.syncActiveBatches.delete(evt.batchIndex);
+            state.syncCompletedBatches += 1;
+          }
+          rebuildActiveBatchItems();
           state.syncProcessedTotal = evt.processed || 0;
           state.syncCompletedCount = evt.completed || state.syncProcessedTotal;
           state.syncFailedCount = evt.failed || 0;
@@ -5707,20 +5871,28 @@ async function runSyncBatches() {
               title: firstFiled.title || "",
               extraCount: Math.max(0, evt.filed.length - 1),
             };
+            for (const f of evt.filed) {
+              if (f?.sessionId) syncFiledIds.add(f.sessionId);
+            }
           }
           if (evt.plane) {
             lastApiRefreshMs = Date.now();
             applyPlaneResponse(evt.plane);
+          } else if (Array.isArray(evt.filed) && evt.filed.length > 0) {
+            if (syncFiledIds.size > 0 && Array.isArray(state.unsummarized)) {
+              syncKnownSourceExists(state.knownSourceExists, null, state.unsummarized, false);
+              state.unsummarized = state.unsummarized.filter((u) => !syncFiledIds.has(u.id));
+            }
+            scheduleLitePlaneRefresh();
           }
           render();
-          if (state.syncStopRequested) {
-            stoppedByUser = true;
-            ctrl.abort();
-            return true;
-          }
-          return false;
+          return;
         }
         if (evt.type === "complete") {
+          cancelLiteRefresh();
+          if (state.syncStopRequested) {
+            stoppedByUser = true;
+          }
           if (evt.summary) {
             state.syncProcessedTotal = evt.summary.processed || 0;
             state.syncFailedCount = evt.summary.failed || 0;
@@ -5733,9 +5905,7 @@ async function runSyncBatches() {
             applyPlaneResponse(evt.plane);
           }
           render();
-          return false;
         }
-        return false;
       };
 
       while (true) {
@@ -5743,17 +5913,12 @@ async function runSyncBatches() {
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         let nlIdx = buf.indexOf("\n");
-        let shouldStop = false;
         while (nlIdx !== -1) {
           const line = buf.slice(0, nlIdx);
           buf = buf.slice(nlIdx + 1);
-          if (handleEventLine(line)) {
-            shouldStop = true;
-            break;
-          }
+          handleEventLine(line);
           nlIdx = buf.indexOf("\n");
         }
-        if (shouldStop) break;
       }
       const tail = buf + decoder.decode();
       if (tail.trim() && !stoppedByUser) {
@@ -5784,6 +5949,7 @@ async function runSyncBatches() {
     }
   } catch (err) {
     if (err?.name === "AbortError" || state.syncStopRequested) {
+      abortedMidStream = true;
       showToast(t("toastSyncStopped", { n: state.syncProcessedTotal }));
     } else if (state.syncProcessedTotal > 0) {
       showToast(t("toastSynced", { n: state.syncProcessedTotal, backend: backendUsed }));
@@ -5791,12 +5957,19 @@ async function runSyncBatches() {
       showToast(lastErrorMsg || "Sync connection interrupted");
     }
   } finally {
+    cancelLiteRefresh();
     state.isSyncing = false;
     state.syncStopRequested = false;
+    state.syncRunId = null;
+    state.syncActiveBatches.clear();
+    state.syncCompletedBatches = 0;
     state.syncBatchItems = [];
     state.syncAbortController = null;
     invalidateSyncEstimate(true);
     render();
+    if (abortedMidStream && state.dataSource === "api") {
+      void loadPlaneFromApi(false);
+    }
   }
 }
 
@@ -6349,6 +6522,12 @@ document.addEventListener("click", (e) => {
       state.syncAbortController.abort();
     } else {
       state.syncStopRequested = true;
+      if (state.dataSource === "api") {
+        const stopUrl = state.syncRunId
+          ? `/api/sync/stop?runId=${encodeURIComponent(state.syncRunId)}`
+          : "/api/sync/stop";
+        void fetch(stopUrl, { method: "POST" }).catch(() => {});
+      }
     }
     render();
     return;
@@ -6699,9 +6878,10 @@ document.addEventListener("click", (e) => {
   if (action === "step") {
     const f = btn.dataset.field;
     const d = Number(btn.dataset.delta);
+    const isConcurrency = f === "syncConcurrency";
     const isUnit = f === "fewestUserInputs" || f === "sessionsShownPerLine" || f === "syncBatchLimit";
-    const min = isUnit ? 1 : 5;
-    const max = isUnit ? 50 : 200;
+    const min = isConcurrency || isUnit ? 1 : 5;
+    const max = isConcurrency ? 16 : isUnit ? 50 : 200;
     state.settings[f] = Math.max(min, Math.min(max, (Number(state.settings[f]) || min) + d));
     render();
     persistSettings();

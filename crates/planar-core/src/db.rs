@@ -14,7 +14,8 @@ use crate::defaults::{
     FEWEST_USER_INPUTS_MIN, LINE_PRIORITY_MAX, LINE_PRIORITY_MIN, MAX_SHORT_ITEMS_RETURNED,
     ONE_OFF_LINE_COLOR_INDEX, QUERY_LIMIT_MAX, QUERY_LIMIT_MIN, SEARCH_DAYS_MAX,
     SESSIONS_SHOWN_PER_LINE_MIN, SLICER_STEPS_MIN, STATUS_WINDOW_DAYS_MAX, SYNC_BATCH_LIMIT_MAX,
-    SYNC_BATCH_LIMIT_MIN, WINDOW_DAYS_MAX, WINDOW_DAYS_MIN, harness_order, palette_color,
+    SYNC_BATCH_LIMIT_MIN, SYNC_CONCURRENCY_MAX, SYNC_CONCURRENCY_MIN, WINDOW_DAYS_MAX,
+    WINDOW_DAYS_MIN, harness_order, palette_color,
 };
 pub use crate::defaults::{MAX_L1_BATCH_LINES, MAX_L2_BATCH_SESSIONS};
 use crate::env::{HarnessRoots, cli_binary_name_for_harness, resolve_cli_binary};
@@ -22,11 +23,11 @@ use crate::error::{PlanarError, Result};
 use crate::model::{
     AmbiguousSessionHint, AppSettings, BatchLinesResponse, BatchSessionsResponse,
     ContributionDayDto, DayMeta, HarnessCount, HarnessStatusDto, INTERNAL_DIGEST_SENTINEL,
-    LineDetailDto, LineDto, LineHint, LineIdUpdate, LineSessionDigestDto, LiveSessionSummary,
-    ONE_OFF_LINE_ID, PlaneResponse, SearchHitDto, SearchQuery, SearchResponse, SessionDepLink,
-    SessionDigestSummaryDto, SessionDto, SessionFocus, SessionSliceDto, ShortItemDto,
-    ShortSessionsDto, SlicedTurnDto, StatusDependency, StatusLineSummary, StatusSessionPreview,
-    StatusSnapshot, UnsummarizedDto,
+    LineDetailDto, LineDto, LineHint, LineIdUpdate, LineSessionDigestDto, LitePlaneResponse,
+    LiveSessionSummary, ONE_OFF_LINE_ID, PlaneResponse, SearchHitDto, SearchQuery, SearchResponse,
+    SessionDepLink, SessionDigestSummaryDto, SessionDto, SessionFocus, SessionSliceDto,
+    ShortItemDto, ShortSessionsDto, SlicedTurnDto, StatusDependency, StatusLineSummary,
+    StatusSessionPreview, StatusSnapshot, UnsummarizedDto,
 };
 use crate::pricing::estimate_cost_usd;
 
@@ -888,6 +889,9 @@ impl Store {
         sanitized.sync_batch_limit = sanitized
             .sync_batch_limit
             .clamp(SYNC_BATCH_LIMIT_MIN, SYNC_BATCH_LIMIT_MAX);
+        sanitized.sync_concurrency = sanitized
+            .sync_concurrency
+            .clamp(SYNC_CONCURRENCY_MIN, SYNC_CONCURRENCY_MAX);
         if !matches!(sanitized.language.as_str(), "zh" | "en") {
             sanitized.language = defaults.language;
         }
@@ -1282,6 +1286,55 @@ impl Store {
         hydrated_path: &OsStr,
         now: DateTime<Local>,
     ) -> Result<PlaneResponse> {
+        let parts = self.build_plane_core(window_days, anchor_date, true, now)?;
+        let contributions = self.compute_contribution_calendar(
+            &parts.core.settings,
+            &parts.intervals_map,
+            &parts.subagent_rollups,
+            parts.today,
+            parts.offset,
+            parts.now_ms,
+        )?;
+        let harnesses =
+            self.collect_harness_statuses(&parts.core.settings, base_roots, hydrated_path)?;
+
+        Ok(PlaneResponse {
+            days: parts.core.days,
+            anchor_date: parts.core.anchor_date,
+            now_hour: parts.core.now_hour,
+            tz_label: parts.core.tz_label,
+            archived_count: parts.core.archived_count,
+            settings: parts.core.settings,
+            lines: parts.core.lines,
+            unsummarized: parts.core.unsummarized,
+            short_sessions: parts.core.short_sessions,
+            contributions,
+            harnesses,
+            last_sync: None,
+        })
+    }
+
+    /// Builds a lightweight `LitePlaneResponse` over `window_days` ending at `anchor_date` (or today),
+    /// skipping the 20-week contribution heatmap, CLI `$PATH` probe, and per-session `source_path` disk
+    /// `stat()` checks for fast incremental UI refreshes during streaming `Sync`.
+    pub fn build_lite_plane_response(
+        &self,
+        window_days: usize,
+        anchor_date: Option<NaiveDate>,
+        now: DateTime<Local>,
+    ) -> Result<LitePlaneResponse> {
+        Ok(self
+            .build_plane_core(window_days, anchor_date, false, now)?
+            .core)
+    }
+
+    fn build_plane_core(
+        &self,
+        window_days: usize,
+        anchor_date: Option<NaiveDate>,
+        check_source_exists: bool,
+        now: DateTime<Local>,
+    ) -> Result<PlaneCoreParts> {
         let settings = self.get_settings()?;
         let effective_days = window_days.clamp(WINDOW_DAYS_MIN, WINDOW_DAYS_MAX);
         let local_fixed: DateTime<FixedOffset> = now.with_timezone(now.offset());
@@ -1363,7 +1416,7 @@ impl Store {
                 sum_interval_minutes_in_range(intervals, range_start_ms, window_end_ms);
             let running = is_session_running(row.has_open_turn, row.last_active_at, now_ms);
             let recency = format_recency(row.last_active_at, now_ms, running);
-            let source_exists = Path::new(&row.source_path).exists();
+            let source_exists = check_source_exists.then(|| Path::new(&row.source_path).exists());
             let (total_tokens, cost_usd) =
                 resolve_session_usage(&row, subagent_rollups.get(&row.id));
 
@@ -1484,17 +1537,8 @@ impl Store {
         let short_week_cost_usd: f64 = short_all.iter().filter_map(|s| s.cost_usd).sum();
         short_all.truncate(MAX_SHORT_ITEMS_RETURNED);
 
-        let contributions = self.compute_contribution_calendar(
-            &settings,
-            &intervals_map,
-            &subagent_rollups,
-            today,
-            offset,
-            now_ms,
-        )?;
-        let harnesses = self.collect_harness_statuses(&settings, base_roots, hydrated_path)?;
-
-        Ok(PlaneResponse {
+        let core = LitePlaneResponse {
+            is_lite: !check_source_exists,
             days,
             anchor_date: end_date.format("%Y-%m-%d").to_string(),
             now_hour: fractional_hour(local_fixed),
@@ -1510,9 +1554,16 @@ impl Store {
                 week_tokens: short_week_tokens,
                 week_cost_usd: short_week_cost_usd,
             },
-            contributions,
-            harnesses,
             last_sync: None,
+        };
+
+        Ok(PlaneCoreParts {
+            core,
+            intervals_map,
+            subagent_rollups,
+            today,
+            offset,
+            now_ms,
         })
     }
 
@@ -1876,48 +1927,43 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO session_digests (session_id, last_step_index, slice_config_hash, title, stopped_at, left_open, hidden)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
-             ON CONFLICT(session_id) DO UPDATE SET
-                last_step_index = excluded.last_step_index,
-                slice_config_hash = excluded.slice_config_hash,
-                title = excluded.title,
-                stopped_at = excluded.stopped_at,
-                left_open = excluded.left_open",
-            params![
-                session_id,
-                i64::try_from(step_count).unwrap_or(i64::MAX),
-                slice_hash,
-                title.trim(),
-                stopped_at.trim(),
-                left_open.trim(),
-            ],
+        apply_session_digest_tx(
+            &tx,
+            session_id,
+            step_count,
+            slice_hash,
+            title,
+            stopped_at,
+            left_open,
+            suggested_line,
+            is_one_off,
         )?;
+        tx.commit()?;
+        Ok(())
+    }
 
-        let existing_assignment: Option<(Option<String>, Option<i64>)> = tx
-            .query_row(
-                "SELECT s.line_id, l.pinned
-                 FROM sessions s
-                 LEFT JOIN lines l ON l.id = s.line_id
-                 WHERE s.id = ?1",
-                params![session_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-
-        if let Some((cur_line_id, cur_pinned)) = existing_assignment {
-            let can_assign = cur_line_id.is_none() || cur_pinned == Some(0);
-            if can_assign {
-                let target_line_id = resolve_or_create_line_tx(&tx, suggested_line, is_one_off)?;
-                tx.execute(
-                    "UPDATE sessions SET line_id = ?2 WHERE id = ?1",
-                    params![session_id, target_line_id],
-                )?;
-            }
+    /// Commits a batch of generated session digests inside a single `IMMEDIATE` WAL transaction,
+    /// minimizing lock acquisitions under concurrent `Sync` while preserving `pinned = 1` immutability.
+    pub fn apply_session_digests_batch(&mut self, writes: &[SessionDigestWrite]) -> Result<()> {
+        if writes.is_empty() {
+            return Ok(());
         }
-
-        sync_session_fts_conn(&tx, session_id)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for w in writes {
+            apply_session_digest_tx(
+                &tx,
+                &w.session_id,
+                w.step_count,
+                &w.slice_hash,
+                &w.title,
+                &w.stopped_at,
+                &w.left_open,
+                &w.suggested_line,
+                w.is_one_off,
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -3238,6 +3284,76 @@ fn insert_line_conn(conn: &Connection, name: &str, pinned: bool) -> Result<Strin
     Ok(candidate)
 }
 
+/// Owned digest payload passed to `Store::apply_session_digests_batch`.
+#[derive(Debug, Clone)]
+pub struct SessionDigestWrite {
+    pub session_id: String,
+    pub step_count: u64,
+    pub slice_hash: String,
+    pub title: String,
+    pub stopped_at: String,
+    pub left_open: String,
+    pub suggested_line: String,
+    pub is_one_off: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_session_digest_tx(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    step_count: u64,
+    slice_hash: &str,
+    title: &str,
+    stopped_at: &str,
+    left_open: &str,
+    suggested_line: &str,
+    is_one_off: bool,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO session_digests (session_id, last_step_index, slice_config_hash, title, stopped_at, left_open, hidden)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
+         ON CONFLICT(session_id) DO UPDATE SET
+            last_step_index = excluded.last_step_index,
+            slice_config_hash = excluded.slice_config_hash,
+            title = excluded.title,
+            stopped_at = excluded.stopped_at,
+            left_open = excluded.left_open",
+        params![
+            session_id,
+            i64::try_from(step_count).unwrap_or(i64::MAX),
+            slice_hash,
+            title.trim(),
+            stopped_at.trim(),
+            left_open.trim(),
+        ],
+    )?;
+
+    let existing_assignment: Option<(Option<String>, Option<i64>)> = tx
+        .query_row(
+            "SELECT s.line_id, l.pinned
+             FROM sessions s
+             LEFT JOIN lines l ON l.id = s.line_id
+             WHERE s.id = ?1",
+            params![session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+
+    if let Some((cur_line_id, cur_pinned)) = existing_assignment {
+        let can_assign = cur_line_id.is_none() || cur_pinned == Some(0);
+        if can_assign {
+            let target_line_id = resolve_or_create_line_tx(tx, suggested_line, is_one_off)?;
+            tx.execute(
+                "UPDATE sessions SET line_id = ?2 WHERE id = ?1",
+                params![session_id, target_line_id],
+            )?;
+        }
+    }
+
+    sync_session_fts_conn(tx, session_id)?;
+    Ok(())
+}
+
 fn resolve_or_create_line_tx(
     tx: &rusqlite::Transaction<'_>,
     line_name: &str,
@@ -3260,6 +3376,15 @@ fn resolve_or_create_line_tx(
     }
 
     insert_line_conn(tx, trimmed, false)
+}
+
+struct PlaneCoreParts {
+    core: LitePlaneResponse,
+    intervals_map: HashMap<String, Vec<RawSpan>>,
+    subagent_rollups: HashMap<String, SubagentRollup>,
+    today: NaiveDate,
+    offset: FixedOffset,
+    now_ms: i64,
 }
 
 struct LineRow {
@@ -4159,8 +4284,22 @@ mod tests {
             .find(|s| s.id == "codex:pruned-1")
             .unwrap();
         assert_eq!(dto.title, "Preserved Monthly Summary");
-        assert!(!dto.source_exists);
+        assert_eq!(dto.source_exists, Some(false));
         assert_eq!(dto.bursts.len(), 1);
+
+        // Lite snapshot skips disk stat() and explicitly marks `source_exists` as `None` (unknown).
+        let lite = store.build_lite_plane_response(30, None, now).unwrap();
+        assert!(lite.is_lite);
+        let lite_dto = lite
+            .lines
+            .iter()
+            .find(|l| l.name == "Planar Core")
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|s| s.id == "codex:pruned-1")
+            .unwrap();
+        assert_eq!(lite_dto.source_exists, None);
     }
 
     #[test]

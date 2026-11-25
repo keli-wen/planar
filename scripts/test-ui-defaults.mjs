@@ -632,3 +632,525 @@ test("partial timeline Sync invalidates stale 2-session estimate and refreshes r
     globalThis.fetch = prevFetch;
   }
 });
+
+test("Settings processor view renders syncConcurrency stepper cleanly in zh/en and API/CLI modes", () => {
+  state.settingsTab = "processor";
+  assert.equal(DEFAULTS_JSON.defaultSettings.syncConcurrency, 4);
+  assert.equal(DEFAULT_SETTINGS.syncConcurrency, 4);
+
+  for (const [language, mode, expectedTitle, expectedDesc] of [
+    ["zh", "api", "并发归纳批次数", "同时并行处理的批次数（1–16，默认 4）。"],
+    ["zh", "cli", "并发归纳批次数", "本地 CLI 模式自动限制为 ≤ 2 并发，避免子进程过载。"],
+    ["en", "api", "Concurrent Sync batches", "Batches run in parallel (1–16, default 4)."],
+    ["en", "cli", "Concurrent Sync batches", "Local CLI mode caps active subprocesses at 2."],
+  ]) {
+    applyPlaneResponse(
+      makePlanePayload({
+        language,
+        processorConfigured: true,
+        processorMode: mode,
+        apiProvider: "gemini",
+        cliHarness: "codex",
+        syncConcurrency: 4,
+      }),
+    );
+    const html = renderSettingsView();
+    assert.ok(html.includes('data-field="syncConcurrency"'), "missing syncConcurrency stepper");
+    assert.ok(html.includes(expectedTitle), `missing title for ${language}/${mode}`);
+    assert.ok(html.includes(expectedDesc), `missing description for ${language}/${mode}`);
+  }
+});
+
+test("lightweight batchDone without plane removes filed sessions and refreshes via lite=1 before complete", async () => {
+  const prevFetch = globalThis.fetch;
+  const requestedUrls = [];
+  const settings = {
+    language: "en",
+    processorConfigured: true,
+    processorMode: "api",
+    apiProvider: "gemini",
+    apiModel: "gemini-4-hydrogen",
+    syncConcurrency: 4,
+  };
+  const finalPlane = {
+    ...makePlanePayload(settings),
+    unsummarized: [],
+    lines: [
+      {
+        id: "planar",
+        name: "planar",
+        description: "",
+        color: "#A43D74",
+        pinned: false,
+        isSystemBucket: false,
+        priority: 0,
+        status: "active",
+        sessions: [],
+      },
+    ],
+  };
+
+  globalThis.fetch = async (url) => {
+    const href = String(url);
+    requestedUrls.push(href);
+    if (href.startsWith("/api/sync/stream?")) {
+      const encoder = new TextEncoder();
+      const lines = [
+        JSON.stringify({
+          type: "start",
+          total: 2,
+          totalBatches: 2,
+          batchSize: 1,
+          concurrency: 2,
+          backend: "api:gemini",
+        }),
+        JSON.stringify({
+          type: "batchStart",
+          batchIndex: 1,
+          totalBatches: 2,
+          batchSize: 1,
+          items: [{ sessionId: "codex:1", harness: "codex", label: "first" }],
+        }),
+        JSON.stringify({
+          type: "batchStart",
+          batchIndex: 2,
+          totalBatches: 2,
+          batchSize: 1,
+          items: [{ sessionId: "codex:2", harness: "codex", label: "second" }],
+        }),
+        JSON.stringify({
+          type: "batchDone",
+          batchIndex: 2,
+          totalBatches: 2,
+          batchProcessed: 1,
+          batchFailed: 0,
+          filed: [{ sessionId: "codex:2", title: "Filed 2", lineName: "planar" }],
+          error: null,
+          processed: 1,
+          failed: 0,
+          skipped: 0,
+          completed: 1,
+          total: 2,
+          backendUsed: "api:gemini",
+        }),
+        JSON.stringify({
+          type: "batchDone",
+          batchIndex: 1,
+          totalBatches: 2,
+          batchProcessed: 1,
+          batchFailed: 0,
+          filed: [{ sessionId: "codex:1", title: "Filed 1", lineName: "planar" }],
+          error: null,
+          processed: 2,
+          failed: 0,
+          skipped: 0,
+          completed: 2,
+          total: 2,
+          backendUsed: "api:gemini",
+        }),
+        JSON.stringify({
+          type: "complete",
+          summary: {
+            processed: 2,
+            failed: 0,
+            skipped: 0,
+            backendUsed: "api:gemini",
+            lastError: null,
+          },
+          plane: finalPlane,
+        }),
+      ].join("\n");
+      const chunks = [encoder.encode(`${lines}\n`)];
+      let i = 0;
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader() {
+            return {
+              async read() {
+                if (i < chunks.length) return { value: chunks[i++], done: false };
+                return { value: undefined, done: true };
+              },
+            };
+          },
+        },
+      };
+    }
+    if (href.startsWith("/api/plane?") && href.includes("lite=1")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            days: finalPlane.days,
+            anchorDate: finalPlane.anchorDate,
+            nowHour: finalPlane.nowHour,
+            tzLabel: finalPlane.tzLabel,
+            archivedCount: 0,
+            settings,
+            lines: finalPlane.lines,
+            unsummarized: [],
+            shortSessions: finalPlane.shortSessions,
+            lastSync: null,
+          };
+        },
+      };
+    }
+    if (href.startsWith("/api/sync/estimate?")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            sessionCount: 0,
+            batchCount: 0,
+            estimatedInputTokens: 0,
+            estimatedOutputTokens: 0,
+            estimatedThinkingTokens: 0,
+            estimatedCostUsdRange: null,
+            model: "gemini-4-hydrogen",
+            backend: "api:gemini",
+            isLocalCli: false,
+          };
+        },
+      };
+    }
+    throw new Error(`Unexpected fetch in lightweight batchDone test: ${href}`);
+  };
+
+  try {
+    state.selectedHarness = "all";
+    state.route = "main";
+    applyPlaneResponse({
+      ...makePlanePayload(settings),
+      unsummarized: [
+        { id: "codex:1", harness: "codex", firstPrompt: "first", steps: 4, userInputCount: 3, bursts: [] },
+        { id: "codex:2", harness: "codex", firstPrompt: "second", steps: 4, userInputCount: 3, bursts: [] },
+      ],
+    });
+    await runSyncBatches();
+    assert.equal(state.unsummarized.length, 0);
+    assert.equal(state.lines.length, 1);
+    assert.ok(
+      requestedUrls.some((u) => u.includes("/api/plane?") && u.includes("lite=1")),
+      `expected throttled lite=1 refresh during stream, got ${JSON.stringify(requestedUrls)}`,
+    );
+    assert.ok(
+      requestedUrls.some((u) => u.startsWith("/api/sync/stream?") && u.includes("runId=")),
+      `expected scoped runId on /api/sync/stream, got ${JSON.stringify(requestedUrls)}`,
+    );
+  } finally {
+    state.selectedHarness = "all";
+    globalThis.fetch = prevFetch;
+  }
+});
+
+test("lite snapshot reconciles against newer batchDone events and preserves known sourceExists across Pending-to-Line moves", async () => {
+  const prevFetch = globalThis.fetch;
+  let resolveLiteJson;
+  let streamChunkRelease;
+  const settings = {
+    language: "en",
+    processorConfigured: true,
+    processorMode: "api",
+    apiProvider: "gemini",
+    apiModel: "gemini-4-hydrogen",
+    syncConcurrency: 4,
+  };
+  const prunedSession = {
+    id: "codex:pruned",
+    harness: "codex",
+    title: "Pruned Old Session",
+    rawTitle: "Pruned Old Session",
+    steps: 6,
+    userInputCount: 3,
+    recency: "2d ago",
+    running: false,
+    stoppedAt: "Locked",
+    leftOpen: "",
+    dependsOnId: null,
+    hidden: false,
+    archived: false,
+    cwd: "/tmp/ws",
+    sourcePath: "/tmp/missing.jsonl",
+    sourceExists: false,
+    model: null,
+    totalTokens: 0,
+    costUsd: null,
+    lastActiveAt: 1000,
+    bursts: [],
+  };
+
+  globalThis.fetch = async (url) => {
+    const href = String(url);
+    if (href.startsWith("/api/sync/stream?")) {
+      const encoder = new TextEncoder();
+      const firstBatchEvents = [
+        JSON.stringify({
+          type: "start",
+          total: 2,
+          totalBatches: 2,
+          batchSize: 1,
+          concurrency: 2,
+          backend: "api:gemini",
+        }),
+        JSON.stringify({
+          type: "batchDone",
+          batchIndex: 1,
+          totalBatches: 2,
+          batchProcessed: 1,
+          batchFailed: 0,
+          // `codex:pruned-move` starts in `unsummarized` with `sourceExists: false` and moves to a Line!
+          filed: [{ sessionId: "codex:pruned-move", title: "Filed Pruned", lineName: "planar" }],
+          error: null,
+          processed: 1,
+          failed: 0,
+          skipped: 0,
+          completed: 1,
+          total: 2,
+          backendUsed: "api:gemini",
+        }),
+      ].join("\n");
+      const secondBatchEvent = JSON.stringify({
+        type: "batchDone",
+        batchIndex: 2,
+        totalBatches: 2,
+        batchProcessed: 1,
+        batchFailed: 0,
+        filed: [{ sessionId: "codex:2", title: "Filed 2", lineName: "planar" }],
+        error: null,
+        processed: 2,
+        failed: 0,
+        skipped: 0,
+        completed: 2,
+        total: 2,
+        backendUsed: "api:gemini",
+      });
+      const completeEvent = JSON.stringify({
+        type: "complete",
+        summary: {
+          processed: 2,
+          failed: 0,
+          skipped: 0,
+          backendUsed: "api:gemini",
+          lastError: null,
+        },
+        plane: {
+          ...makePlanePayload(settings),
+          lines: [
+            {
+              id: "planar",
+              name: "planar",
+              description: "",
+              color: "#A43D74",
+              pinned: false,
+              isSystemBucket: false,
+              priority: 0,
+              status: "active",
+              sessions: [prunedSession],
+            },
+          ],
+          unsummarized: [],
+        },
+      });
+      let step = 0;
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader() {
+            return {
+              async read() {
+                if (step === 0) {
+                  step += 1;
+                  return { value: encoder.encode(`${firstBatchEvents}\n`), done: false };
+                }
+                if (step === 1) {
+                  step += 1;
+                  // Emit Batch 2 BEFORE the stale lite snapshot from Batch 1 resolves!
+                  return { value: encoder.encode(`${secondBatchEvent}\n`), done: false };
+                }
+                if (step === 2) {
+                  step += 1;
+                  await new Promise((resolve) => {
+                    streamChunkRelease = resolve;
+                  });
+                  return { value: encoder.encode(`${completeEvent}\n`), done: false };
+                }
+                return { value: undefined, done: true };
+              },
+            };
+          },
+        },
+      };
+    }
+    if (href.startsWith("/api/plane?") && href.includes("lite=1")) {
+      return {
+        ok: true,
+        status: 200,
+        json() {
+          return new Promise((resolve) => {
+            resolveLiteJson = () =>
+              resolve({
+                isLite: true,
+                days: makePlanePayload(settings).days,
+                anchorDate: "2026-11-14",
+                nowHour: 12,
+                tzLabel: "UTC+8",
+                archivedCount: 0,
+                settings,
+                lines: [
+                  {
+                    id: "planar",
+                    name: "planar",
+                    description: "",
+                    color: "#A43D74",
+                    pinned: false,
+                    isSystemBucket: false,
+                    priority: 0,
+                    status: "active",
+                    // Lite snapshot omits stat() and sends `sourceExists: null` (unknown) for all items:
+                    // 1) previously filed `codex:pruned`, 2) moved `codex:pruned-move`, 3) brand-new unknown `codex:brand-new`.
+                    sessions: [
+                      { ...prunedSession, sourceExists: null },
+                      { ...prunedSession, id: "codex:pruned-move", title: "Filed Pruned", sourceExists: null },
+                      { ...prunedSession, id: "codex:brand-new", title: "Brand New", sourceExists: null },
+                    ],
+                  },
+                ],
+                // Stale snapshot taken before Batch 2 committed still includes `codex:2`!
+                unsummarized: [
+                  {
+                    id: "codex:2",
+                    harness: "codex",
+                    firstPrompt: "second",
+                    steps: 4,
+                    userInputCount: 3,
+                    sourceExists: null,
+                    bursts: [],
+                  },
+                  {
+                    id: "codex:pruned-pending",
+                    harness: "codex",
+                    firstPrompt: "pruned pending",
+                    steps: 4,
+                    userInputCount: 3,
+                    sourceExists: null,
+                    bursts: [],
+                  },
+                ],
+                shortSessions: { totalCount: 0, items: [], weekMinutes: 0 },
+                lastSync: null,
+              });
+          });
+        },
+      };
+    }
+    if (href.startsWith("/api/sync/estimate?")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            sessionCount: 0,
+            batchCount: 0,
+            estimatedInputTokens: 0,
+            estimatedOutputTokens: 0,
+            estimatedThinkingTokens: 0,
+            estimatedCostUsdRange: null,
+            model: "gemini-4-hydrogen",
+            backend: "api:gemini",
+            isLocalCli: false,
+          };
+        },
+      };
+    }
+    throw new Error(`Unexpected fetch in lite reconciliation test: ${href}`);
+  };
+
+  try {
+    state.selectedHarness = "all";
+    state.route = "main";
+    applyPlaneResponse({
+      ...makePlanePayload(settings),
+      lines: [
+        {
+          id: "planar",
+          name: "planar",
+          description: "",
+          color: "#A43D74",
+          pinned: false,
+          isSystemBucket: false,
+          priority: 0,
+          status: "active",
+          sessions: [prunedSession],
+        },
+      ],
+      unsummarized: [
+        {
+          id: "codex:pruned-move",
+          harness: "codex",
+          firstPrompt: "pruned pending moved to line",
+          steps: 4,
+          userInputCount: 3,
+          sourceExists: false,
+          bursts: [],
+        },
+        { id: "codex:2", harness: "codex", firstPrompt: "second", steps: 4, userInputCount: 3, sourceExists: true, bursts: [] },
+        {
+          id: "codex:pruned-pending",
+          harness: "codex",
+          firstPrompt: "pruned pending",
+          steps: 4,
+          userInputCount: 3,
+          sourceExists: false,
+          bursts: [],
+        },
+      ],
+    });
+
+    const syncPromise = runSyncBatches();
+    // Wait until Batch 1 and Batch 2 have been processed and lite=1 request is in flight.
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(typeof resolveLiteJson, "function", "expected in-flight lite=1 refresh");
+    // Resolve stale lite snapshot AFTER Batch 2 already filed `codex:2`.
+    resolveLiteJson();
+    await new Promise((r) => setTimeout(r, 15));
+
+    // Stale lite snapshot MUST NOT resurrect `codex:2` in unsummarized!
+    assert.deepEqual(
+      state.unsummarized.map((u) => u.id),
+      ["codex:pruned-pending"],
+      "stale lite snapshot must not resurrect sessions filed by newer BatchDone events",
+    );
+    // Known `sourceExists: false` MUST be preserved on already-filed, Pending-to-Line moved, and still-pending sessions!
+    const byId = new Map(state.lines[0].sessions.map((s) => [s.id, s]));
+    assert.equal(
+      byId.get("codex:pruned")?.sourceExists,
+      false,
+      "lite snapshot must preserve known sourceExists=false on already-filed sessions",
+    );
+    assert.equal(
+      byId.get("codex:pruned-move")?.sourceExists,
+      false,
+      "lite snapshot must preserve known sourceExists=false across Pending-to-Line moves",
+    );
+    assert.equal(
+      byId.get("codex:brand-new")?.sourceExists,
+      null,
+      "unchecked previously unknown sessions must remain null (unknown), not true",
+    );
+    assert.equal(
+      state.unsummarized[0].sourceExists,
+      false,
+      "lite snapshot must preserve known sourceExists=false on unsummarized sessions",
+    );
+
+    streamChunkRelease();
+    await syncPromise;
+  } finally {
+    state.selectedHarness = "all";
+    globalThis.fetch = prevFetch;
+  }
+});

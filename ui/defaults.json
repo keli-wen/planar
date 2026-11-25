@@ -61,6 +61,7 @@
     "apiModel": "",
     "apiKey": "",
     "syncBatchLimit": 4,
+    "syncConcurrency": 4,
     "enabledHarnesses": {
       "antigravity": true,
       "claude": true,

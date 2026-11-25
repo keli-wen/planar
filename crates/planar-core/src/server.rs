@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, Query, State};
@@ -21,8 +23,8 @@ use crate::env::HarnessRoots;
 use crate::error::{PlanarError, Result};
 use crate::ingest::scan_all_harnesses;
 use crate::model::{
-    AppSettings, LineIdUpdate, PlaneResponse, ProcessorTestResult, SyncEstimateDto,
-    SyncStreamEvent, SyncSummaryDto,
+    AppSettings, LineIdUpdate, LitePlaneResponse, PlaneResponse, ProcessorTestResult,
+    SyncEstimateDto, SyncStreamEvent, SyncSummaryDto,
 };
 use crate::processor;
 
@@ -31,15 +33,57 @@ const STYLES_CSS: &str = include_str!("../../../ui/styles.css");
 const APP_JS: &str = include_str!("../../../ui/app.js");
 const ICON_SVG: &str = include_str!("../../../assets/icon.svg");
 
+const PENDING_STOP_TTL: Duration = Duration::from_secs(300);
+const MAX_PENDING_STOPS: usize = 64;
+static SYNC_RUN_SEQ: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Default)]
+struct SyncDrainRegistry {
+    active: HashMap<String, Weak<AtomicBool>>,
+    pending_stops: HashMap<String, Instant>,
+}
+
+impl SyncDrainRegistry {
+    fn prune_stale(&mut self, now: Instant) {
+        self.active.retain(|_, w| w.strong_count() > 0);
+        self.pending_stops.retain(|_, recorded_at| {
+            now.saturating_duration_since(*recorded_at) < PENDING_STOP_TTL
+        });
+    }
+}
+
+const MAX_RUN_ID_LEN: usize = 128;
+
+fn validate_run_id(raw: Option<&str>) -> Result<Option<String>> {
+    let Some(raw_val) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw_val.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > MAX_RUN_ID_LEN
+        || trimmed.starts_with("__")
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(PlanarError::InvalidInput(
+            "invalid `runId` query parameter (must be 1..=128 ASCII [A-Za-z0-9._:-] chars and not start with `__`)".into(),
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 /// Shared state for the Planar local HTTP API server.
 #[derive(Clone)]
 pub struct AppState {
     pub db_path: PathBuf,
     pub roots: HarnessRoots,
     pub hydrated_path: Arc<OsString>,
+    pub http_client: reqwest::Client,
     pub scan_lock: Arc<Mutex<()>>,
     pub last_scan_ms: Arc<AtomicI64>,
     pub last_sync: Arc<StdMutex<Option<SyncSummaryDto>>>,
+    sync_drains: Arc<StdMutex<SyncDrainRegistry>>,
 }
 
 impl AppState {
@@ -62,10 +106,92 @@ impl AppState {
             db_path,
             roots,
             hydrated_path: Arc::new(hydrated_path),
+            http_client: processor::build_shared_http_client(),
             scan_lock: Arc::new(Mutex::new(())),
             last_scan_ms: Arc::new(AtomicI64::new(0)),
             last_sync: Arc::new(StdMutex::new(None)),
+            sync_drains: Arc::new(StdMutex::new(SyncDrainRegistry::default())),
         }
+    }
+
+    /// Allocates and registers a per-run drain flag before scanning/streaming begins.
+    /// Rejects invalid `run_id` values and duplicate active `run_id` registrations.
+    /// If a Stop request for `run_id` already arrived before registration (e.g. during scan),
+    /// the returned flag starts pre-set to `true` so Stop intent is never lost.
+    pub(crate) fn prepare_sync_drain(&self, run_id: Option<&str>) -> Result<Arc<AtomicBool>> {
+        let key = validate_run_id(run_id)?.unwrap_or_else(|| {
+            let seq = SYNC_RUN_SEQ.fetch_add(1, Ordering::Relaxed);
+            format!("__anon_sync_{seq}")
+        });
+        let now = Instant::now();
+        let mut guard = self
+            .sync_drains
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.prune_stale(now);
+        if guard
+            .active
+            .get(&key)
+            .is_some_and(|weak| weak.strong_count() > 0)
+        {
+            return Err(PlanarError::InvalidInput(format!(
+                "sync stream runId `{key}` is already active"
+            )));
+        }
+        let pre_stopped = guard.pending_stops.remove(&key).is_some();
+        let flag = Arc::new(AtomicBool::new(pre_stopped));
+        guard.active.insert(key, Arc::downgrade(&flag));
+        Ok(flag)
+    }
+
+    /// Signals a specific `run_id` (or all currently active runs when `run_id` is `None`) to stop
+    /// dispatching new batches while letting currently in-flight batches drain cleanly.
+    /// Rejects invalid `run_id` values rather than falling back to an unscoped stop.
+    /// When a valid `run_id` has not registered yet (e.g. still initializing), the Stop intent is
+    /// recorded so it takes effect immediately upon registration.
+    pub fn request_sync_drain_for(&self, run_id: Option<&str>) -> Result<bool> {
+        let validated = validate_run_id(run_id)?;
+        let now = Instant::now();
+        let mut guard = self
+            .sync_drains
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.prune_stale(now);
+
+        if let Some(key) = validated {
+            if let Some(flag) = guard.active.get(&key).and_then(Weak::upgrade) {
+                flag.store(true, Ordering::Release);
+                return Ok(true);
+            }
+            if guard.pending_stops.len() >= MAX_PENDING_STOPS
+                && let Some(oldest_key) = guard
+                    .pending_stops
+                    .iter()
+                    .min_by_key(|(_, ts)| *ts)
+                    .map(|(k, _)| k.clone())
+            {
+                guard.pending_stops.remove(&oldest_key);
+            }
+            guard.pending_stops.insert(key, now);
+            return Ok(true);
+        }
+
+        let mut signalled = false;
+        guard.active.retain(|_, weak| {
+            if let Some(flag) = weak.upgrade() {
+                flag.store(true, Ordering::Release);
+                signalled = true;
+                true
+            } else {
+                false
+            }
+        });
+        Ok(signalled)
+    }
+
+    /// Signals all currently active streaming `Sync` runs on this `AppState` to drain.
+    pub fn request_sync_drain(&self) -> bool {
+        self.request_sync_drain_for(None).unwrap_or(false)
     }
 
     /// Runs an incremental scan under `scan_lock` and records the completion timestamp.
@@ -171,6 +297,16 @@ impl AppState {
         self.mutate_and_build_plane(query, |_| Ok(())).await
     }
 
+    async fn build_lite_plane(&self, query: &PlaneQuery) -> Result<LitePlaneResponse> {
+        let days = query.days.unwrap_or(7);
+        let anchor = parse_anchor_date(query.date.as_deref())?;
+        let mut plane = self
+            .with_store(move |store| store.build_lite_plane_response(days, anchor, Local::now()))
+            .await?;
+        plane.last_sync = self.current_last_sync();
+        Ok(plane)
+    }
+
     async fn mutate_and_build_plane<F>(
         &self,
         query: &PlaneQuery,
@@ -233,6 +369,7 @@ fn build_api_router(state: AppState) -> Router {
         .route("/sync", post(post_sync_handler))
         .route("/sync/estimate", get(get_sync_estimate_handler))
         .route("/sync/stream", post(post_sync_stream_handler))
+        .route("/sync/stop", post(post_sync_stop_handler))
         .route("/regroup", post(post_regroup_handler))
         .route("/processor/test", post(post_processor_test_handler))
         .route("/settings", put(put_settings_handler))
@@ -362,15 +499,24 @@ struct PlaneQuery {
     days: Option<usize>,
     rescan: Option<u8>,
     date: Option<String>,
+    lite: Option<u8>,
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SyncQuery {
     days: Option<usize>,
     date: Option<String>,
     harness: Option<String>,
     force: Option<u8>,
     limit: Option<usize>,
+    run_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncStopQuery {
+    run_id: Option<String>,
 }
 
 impl SyncQuery {
@@ -379,6 +525,7 @@ impl SyncQuery {
             days: self.days,
             rescan: None,
             date: self.date.clone(),
+            lite: None,
         }
     }
 
@@ -446,11 +593,15 @@ async fn post_mcp_handler(State(state): State<AppState>, body: Bytes) -> Respons
 async fn get_plane_handler(
     State(state): State<AppState>,
     Query(query): Query<PlaneQuery>,
-) -> ApiResult<Json<PlaneResponse>> {
+) -> ApiResult<Response> {
+    if query.lite == Some(1) {
+        let lite = state.build_lite_plane(&query).await?;
+        return Ok(Json(lite).into_response());
+    }
     let force = query.rescan == Some(1);
     state.maybe_throttled_scan(force).await?;
     let plane = state.build_plane(&query).await?;
-    Ok(Json(plane))
+    Ok(Json(plane).into_response())
 }
 
 async fn post_scan_handler(
@@ -496,8 +647,17 @@ async fn post_sync_stream_handler(
     Query(query): Query<SyncQuery>,
 ) -> ApiResult<Response> {
     let scope = query.to_scope()?;
+    // Validate and register drain handle BEFORE `run_scan()` so invalid/duplicate runIds are
+    // rejected up front and a Stop click during scan is never lost.
+    let drain_flag = state.prepare_sync_drain(query.run_id.as_deref())?;
     state.run_scan().await?;
-    let rx = processor::spawn_sync_stream(state, scope, query.force == Some(1), query.limit);
+    let rx = processor::spawn_sync_stream_with_drain(
+        state,
+        scope,
+        query.force == Some(1),
+        query.limit,
+        drain_flag,
+    );
     let body = Body::from_stream(NdjsonEventStream { rx });
     Ok((
         StatusCode::OK,
@@ -509,6 +669,20 @@ async fn post_sync_stream_handler(
         body,
     )
         .into_response())
+}
+
+#[derive(Serialize)]
+struct SyncStopBody {
+    ok: bool,
+    draining: bool,
+}
+
+async fn post_sync_stop_handler(
+    State(state): State<AppState>,
+    Query(query): Query<SyncStopQuery>,
+) -> ApiResult<Json<SyncStopBody>> {
+    let draining = state.request_sync_drain_for(query.run_id.as_deref())?;
+    Ok(Json(SyncStopBody { ok: true, draining }))
 }
 
 async fn post_regroup_handler(
@@ -531,7 +705,12 @@ async fn post_processor_test_handler(
         serde_json::from_slice::<AppSettings>(&body)
             .map_err(|err| PlanarError::InvalidInput(format!("invalid settings payload: {err}")))?
     };
-    let result = processor::test_processor_connection(&settings, &state.hydrated_path).await?;
+    let result = processor::test_processor_connection_with_client(
+        &settings,
+        &state.hydrated_path,
+        &state.http_client,
+    )
+    .await?;
     Ok(Json(result))
 }
 
@@ -1191,6 +1370,59 @@ mod tests {
         assert_eq!(month_plane["days"].as_array().unwrap().len(), 30);
         assert!(month_plane["contributions"].as_array().unwrap().len() >= 134);
         assert_eq!(month_plane["harnesses"].as_array().unwrap().len(), 4);
+
+        let (lite_st, lite_plane) =
+            send_json(app.clone(), Method::GET, "/api/plane?days=7&lite=1", None).await;
+        assert_eq!(lite_st, StatusCode::OK);
+        assert_eq!(lite_plane["isLite"], true);
+        assert_eq!(lite_plane["days"].as_array().unwrap().len(), 7);
+        assert!(lite_plane.get("contributions").is_none());
+        assert!(lite_plane.get("harnesses").is_none());
+
+        let (stop_st, stop_body) =
+            send_json(app.clone(), Method::POST, "/api/sync/stop", None).await;
+        assert_eq!(stop_st, StatusCode::OK);
+        assert_eq!(stop_body["ok"], true);
+        assert_eq!(stop_body["draining"], false);
+
+        let (scoped_stop_st, scoped_stop_body) = send_json(
+            app.clone(),
+            Method::POST,
+            "/api/sync/stop?runId=pre-reg-run",
+            None,
+        )
+        .await;
+        assert_eq!(scoped_stop_st, StatusCode::OK);
+        assert_eq!(scoped_stop_body["ok"], true);
+        assert_eq!(scoped_stop_body["draining"], true);
+
+        // Invalid runIds are rejected with 400 Bad Request rather than falling back to unscoped stop.
+        for bad_uri in [
+            "/api/sync/stop?runId=",
+            "/api/sync/stop?runId=__reserved",
+            "/api/sync/stop?runId=bad%20id",
+            "/api/sync/stream?runId=bad%20id",
+        ] {
+            let (bad_st, _) = send_json(app.clone(), Method::POST, bad_uri, None).await;
+            assert_eq!(
+                bad_st,
+                StatusCode::BAD_REQUEST,
+                "expected 400 for {bad_uri}"
+            );
+        }
+
+        // Duplicate active runId registration on `/api/sync/stream` returns 400 Bad Request.
+        let dup_state = AppState::new(dir.path().join("planar.db"), test_roots(dir.path()));
+        let _active_guard = dup_state.prepare_sync_drain(Some("dup-live")).unwrap();
+        let dup_app = build_embedded_router(dup_state);
+        let (dup_st, _) = send_json(
+            dup_app,
+            Method::POST,
+            "/api/sync/stream?runId=dup-live",
+            None,
+        )
+        .await;
+        assert_eq!(dup_st, StatusCode::BAD_REQUEST);
 
         let stream_resp = app
             .oneshot(

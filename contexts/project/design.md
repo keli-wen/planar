@@ -43,7 +43,7 @@ Rather than constraining the summarizer with brittle regex heuristics or stopwor
    - User-kept (`[pinned]`) Lines act as in-context few-shot exemplars of preferred granularity and language.
    - Each Line supports an optional user-authored **`description` (`Scope:` note)** injected directly into `Sync` and `Regroup` prompts as an authoritative inclusion rule (e.g., telling the model that `search-core` includes `rank-worker` work).
    - **Merge-to-Teach**: Merging Line A into Line B reassigns all sessions, removes Line A, pins Line B, and appends Line A's name/scope into Line B's `description` so future `Sync`/`Regroup` runs preserve the consolidation automatically.
-   - `Sync` refreshes the Line catalog (with active session counts) across batches so related sessions reuse newly discovered Lines verbatim instead of spawning near-duplicate variants.
+   - `Sync` groups prepared candidates by normalized `cwd` affinity prior to chunking so sessions from the same workspace pack into the same batch while distinct workspaces run concurrently (up to `syncConcurrency`) with minimal cross-batch Line fragmentation; when the catalog has zero non-system Lines, Batch 1 runs as a warm-up seed before fanning out remaining batches, and each newly dispatched batch reads the freshest Line catalog (with active session counts) so related sessions reuse newly discovered Lines verbatim instead of spawning near-duplicate variants.
    - `Regroup` receives `cwd`, `current` Line, `title`, and `stoppedAt` across all unpinned sessions simultaneously so the model distinguishes dedicated project directories from centralized container workspaces empirically.
 
 ---
