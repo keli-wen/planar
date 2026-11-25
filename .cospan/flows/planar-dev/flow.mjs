@@ -3,10 +3,10 @@ import { agent, refine } from 'cospan/flow';
 import devPrompt from './dev.md';
 import prPrompt from './pr.md';
 
-const coder = agent('agy/gemini-4-neon', { effort: 'high', role: 'coder' });
+const coder = agent('agy/gemini-4-neon', { effort: 'xhigh', role: 'coder' });
 const reviewer = agent('codex/gpt-6.2-sol', { effort: 'high', readonly: true, role: 'reviewer' });
 const simplifier = agent('agy/gemini-4-neon', {
-  effort: 'high',
+  effort: 'xhigh',
   readonly: true,
   role: 'simplifier',
 });
