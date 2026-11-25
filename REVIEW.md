@@ -32,6 +32,18 @@
    - **`P0 — Blocker`**: Correctness bug, data loss, security/privacy leak, or core invariant violation (blocks merge).
    - **`P1 — Should Fix`**: Idiom/maintainability defect, missing edge-case test, or contract/context drift (fix or explicitly defer to a linked issue).
    - **`P2 — Suggestion`**: Minor clarity or polish improvement (non-blocking).
+   - **`Pre-existing`**: Defect that already existed outside the PR's changes (non-blocking; note briefly for follow-up instead of blocking merge).
    Each finding cites exact `file:line`, the violated rule/invariant, and a concrete fix.
 4. **Context Coherence Check**:
    If a PR changes CLI flags, HTTP routes, SQLite tables, MCP schemas, or engineering workflows, the reviewer verifies that the corresponding file under `contexts/` (and `skills/planar/SKILL.md` if user-facing) was updated in the same PR.
+
+---
+
+## 3. Scope, Signal & Convergence Discipline
+
+Keep automated and human reviews high-signal and convergent:
+
+1. **Judge strictly within the PR's scope**: Review what this change introduces against the issue objective and Core Invariants above. Do not block a PR on untouched code, unrelated refactors, or `Pre-existing` issues — report those as non-blocking notes.
+2. **Focus on realistic, concrete failures**: Request `revise` only for genuine `P0`/`P1` defects (broken behavior, invariant violations, real data loss, missing coverage for changed logic). Avoid blocking on low-probability hypotheticals (e.g., speculative future config changes or rare multi-process races on single-user local startup paths) unless the PR directly introduces concurrency or migration logic.
+3. **Converge on re-review rounds**: On Round 1, flag the full *class of bug* so all instances get fixed together. On follow-up rounds, verify that prior blockers were resolved and no new `P0`/`P1` regression was introduced — do not peel deeper layers of pre-existing or secondary edge cases across rounds.
+4. **Right-size verification during iteration**: Intermediate fix rounds only need `npm run verify` and targeted unit tests; full `npm run pre-pr` and live CLI/browser smoke checks run once before opening the PR.

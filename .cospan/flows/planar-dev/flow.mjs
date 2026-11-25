@@ -19,7 +19,11 @@ export default async ({ task }) => {
     maxRounds: 2,
     stage: 'review',
   });
-  if (!work.passed) return work;
+  if (work.verdict === 'blocked') return work;
+
+  const reviewNote = work.passed
+    ? ''
+    : `\n\nNote: Review reached maxRounds with a non-blocking residual note — mention it transparently in the PR body:\n${work.summary}`;
 
   work = await refine(work, {
     by: simplifier,
@@ -28,5 +32,5 @@ export default async ({ task }) => {
     stage: 'simplify',
   });
 
-  return await work.continue(prPrompt, { stage: 'pr' });
+  return await work.continue(`${prPrompt}${reviewNote}`, { stage: 'pr' });
 };
