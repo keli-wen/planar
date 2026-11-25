@@ -4,6 +4,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const DEFAULTS_PATH = fileURLToPath(new URL("../ui/defaults.json", import.meta.url));
+const APP_JS_PATH = fileURLToPath(new URL("../ui/app.js", import.meta.url));
 const DEFAULTS_RAW = readFileSync(DEFAULTS_PATH, "utf8");
 const DEFAULTS_JSON = JSON.parse(DEFAULTS_RAW);
 
@@ -121,11 +122,19 @@ globalThis.document = {
 
 const {
   applyPlaneResponse,
+  buildLabelTooltip,
   buildSyncButtonTooltip,
+  buildUnsummarizedSummary,
   DEFAULT_SETTINGS,
+  ensureMockWindowDays,
+  fmtSyncBatchSummary,
   fmtSyncUsageCompact,
+  I18N,
   isProcessorConfigured,
   loadSyncEstimate,
+  localizeRecency,
+  renderContributionPopoverBody,
+  renderPopoverLayer,
   renderSettingsView,
   renderSyncEstimateReadout,
   runSyncBatches,
@@ -1152,5 +1161,338 @@ test("lite snapshot reconciles against newer batchDone events and preserves know
   } finally {
     state.selectedHarness = "all";
     globalThis.fetch = prevFetch;
+  }
+});
+
+function findBalancedBlock(src, openIdx, openChar, closeChar) {
+  assert.equal(src[openIdx], openChar, `expected '${openChar}' at offset ${openIdx}`);
+  let depth = 0;
+  let inTemplate = false;
+  const templateExprBraces = [];
+
+  for (let i = openIdx; i < src.length; i += 1) {
+    const ch = src[i];
+    const next = src[i + 1];
+
+    if (inTemplate) {
+      if (ch === "\\") {
+        i += 1;
+        continue;
+      }
+      if (ch === "`") {
+        inTemplate = false;
+        continue;
+      }
+      if (ch === "$" && next === "{") {
+        inTemplate = false;
+        templateExprBraces.push(1);
+        i += 1;
+      }
+      continue;
+    }
+
+    if (ch === "/" && next === "/") {
+      const nl = src.indexOf("\n", i + 2);
+      if (nl === -1) break;
+      i = nl;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      const end = src.indexOf("*/", i + 2);
+      assert.notEqual(end, -1, "unterminated block comment in ui/app.js");
+      i = end + 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      const quote = ch;
+      for (i += 1; i < src.length; i += 1) {
+        if (src[i] === "\\") {
+          i += 1;
+          continue;
+        }
+        if (src[i] === quote) break;
+      }
+      continue;
+    }
+    if (ch === "`") {
+      inTemplate = true;
+      continue;
+    }
+
+    if (templateExprBraces.length > 0) {
+      if (ch === "{") {
+        templateExprBraces[templateExprBraces.length - 1] += 1;
+      } else if (ch === "}") {
+        templateExprBraces[templateExprBraces.length - 1] -= 1;
+        if (templateExprBraces[templateExprBraces.length - 1] === 0) {
+          templateExprBraces.pop();
+          inTemplate = true;
+        }
+      }
+      continue;
+    }
+
+    if (ch === openChar) {
+      depth += 1;
+    } else if (ch === closeChar) {
+      depth -= 1;
+      if (depth === 0) {
+        return { start: openIdx, end: i + 1 };
+      }
+    }
+  }
+  throw new Error(`Unbalanced '${openChar}...${closeChar}' block starting at offset ${openIdx}`);
+}
+
+function maskRangePreservingNewlines(src, start, end) {
+  const before = src.slice(0, start);
+  const middle = src.slice(start, end).replace(/[^\n]/g, " ");
+  const after = src.slice(end);
+  return `${before}${middle}${after}`;
+}
+
+test("I18N.zh and I18N.en have identical key sets, matching value shapes, and cover all static t() calls", () => {
+  const zhKeys = Object.keys(I18N.zh);
+  const enKeys = Object.keys(I18N.en);
+  const zhSet = new Set(zhKeys);
+  const enSet = new Set(enKeys);
+
+  assert.deepEqual(
+    zhKeys.filter((k) => !enSet.has(k)),
+    [],
+    "keys present in I18N.zh but missing from I18N.en",
+  );
+  assert.deepEqual(
+    enKeys.filter((k) => !zhSet.has(k)),
+    [],
+    "keys present in I18N.en but missing from I18N.zh",
+  );
+
+  for (const key of zhKeys) {
+    const zhVal = I18N.zh[key];
+    const enVal = I18N.en[key];
+    if (Array.isArray(zhVal) || Array.isArray(enVal)) {
+      assert.ok(Array.isArray(zhVal) && Array.isArray(enVal), `I18N.${key} must be an array in both locales`);
+      assert.equal(zhVal.length, enVal.length, `I18N.${key} array length mismatch between zh and en`);
+      assert.ok(
+        zhVal.every((item) => typeof item === "string") && enVal.every((item) => typeof item === "string"),
+        `I18N.${key} array items must all be strings`,
+      );
+    } else {
+      assert.equal(typeof zhVal, "string", `I18N.zh.${key} must be a string`);
+      assert.equal(typeof enVal, "string", `I18N.en.${key} must be a string`);
+      assert.ok(zhVal.length > 0, `I18N.zh.${key} must be non-empty`);
+      assert.ok(enVal.length > 0, `I18N.en.${key} must be non-empty`);
+    }
+  }
+
+  const appSrc = readFileSync(APP_JS_PATH, "utf8");
+  const missingTKeys = [];
+  for (const match of appSrc.matchAll(/\bt\(\s*"([A-Za-z0-9_]+)"/g)) {
+    const key = match[1];
+    if (!zhSet.has(key) || !enSet.has(key)) {
+      missingTKeys.push(key);
+    }
+  }
+  assert.deepEqual(missingTKeys, [], "static t(...) call references missing I18N key(s)");
+});
+
+test("ui/app.js contains no CJK characters outside LANG_OPTIONS and I18N.zh", () => {
+  const appSrc = readFileSync(APP_JS_PATH, "utf8");
+
+  const langMatch = /\bconst\s+LANG_OPTIONS\s*=\s*\[/.exec(appSrc);
+  assert.ok(langMatch, "could not locate LANG_OPTIONS in ui/app.js");
+  const langSpan = findBalancedBlock(appSrc, langMatch.index + langMatch[0].length - 1, "[", "]");
+  assert.ok(appSrc.slice(langSpan.start, langSpan.end).includes("简体中文"));
+
+  const i18nMatch = /\bconst\s+I18N\s*=\s*\{/.exec(appSrc);
+  assert.ok(i18nMatch, "could not locate I18N in ui/app.js");
+  const i18nSpan = findBalancedBlock(appSrc, i18nMatch.index + i18nMatch[0].length - 1, "{", "}");
+  const i18nBody = appSrc.slice(i18nSpan.start, i18nSpan.end);
+
+  const zhMatch = /\bzh\s*:\s*\{/.exec(i18nBody);
+  assert.ok(zhMatch, "could not locate I18N.zh in ui/app.js");
+  const zhOpenAbs = i18nSpan.start + zhMatch.index + zhMatch[0].length - 1;
+  const zhSpan = findBalancedBlock(appSrc, zhOpenAbs, "{", "}");
+  assert.ok(appSrc.slice(zhSpan.start, zhSpan.end).includes("navPlane"));
+
+  // Confirm I18N.en is outside the masked zh span so CJK leaked into I18N.en is caught too.
+  const enMatch = /\ben\s*:\s*\{/.exec(i18nBody);
+  assert.ok(enMatch, "could not locate I18N.en in ui/app.js");
+  const enOpenAbs = i18nSpan.start + enMatch.index + enMatch[0].length - 1;
+  assert.ok(enOpenAbs >= zhSpan.end, "I18N.en must not fall inside the I18N.zh exemption span");
+
+  let masked = maskRangePreservingNewlines(appSrc, langSpan.start, langSpan.end);
+  masked = maskRangePreservingNewlines(masked, zhSpan.start, zhSpan.end);
+
+  const cjkRe = /[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
+  const violations = [];
+  const lines = masked.split("\n");
+  for (let idx = 0; idx < lines.length; idx += 1) {
+    if (cjkRe.test(lines[idx])) {
+      violations.push(`ui/app.js:${idx + 1}: ${lines[idx].trim()}`);
+    }
+  }
+  assert.deepEqual(
+    violations,
+    [],
+    `Found CJK character(s) outside LANG_OPTIONS and I18N.zh:\n${violations.join("\n")}`,
+  );
+});
+
+test("consolidated I18N formatters and popovers render exact zh and en copy", () => {
+  const prevPopover = state.popover;
+  const prevDataSource = state.dataSource;
+  const prevDays = state.days;
+  const prevSelectedDayIdx = state.selectedDayIdx;
+  const prevContributions = state.contributions;
+  const prevLines = state.lines;
+  const prevUnsummarized = state.unsummarized;
+  const prevLang = state.settings.language;
+
+  try {
+    const sampleLine = {
+      id: "line-1",
+      name: "planar",
+      description: "",
+      color: "#A43D74",
+      pinned: true,
+      isSystemBucket: false,
+      priority: 1,
+      status: "active",
+      sessions: [],
+    };
+    const sampleContrib = [
+      {
+        date: "2026-10-05",
+        weekday: 0,
+        totalMinutes: 45,
+        totalTokens: 12000,
+        costUsd: 0.02,
+        sessionCount: 2,
+        byHarness: { codex: 45 },
+      },
+      {
+        date: "2026-11-02",
+        weekday: 0,
+        totalMinutes: 90,
+        totalTokens: 24000,
+        costUsd: 0.04,
+        sessionCount: 3,
+        byHarness: { codex: 90 },
+      },
+    ];
+    const sampleUnsummarized = {
+      harness: "codex",
+      userInputCount: 5,
+      steps: 12,
+      cwd: "/tmp/demo",
+    };
+    const sampleLane = {
+      kind: "parent",
+      label: "planar",
+      stats: {
+        activeSessions: [{ title: "First" }, { title: "Second" }],
+        agentMins: 40,
+        wallMins: 30,
+        tokens: 12000,
+        costUsd: 0.03,
+      },
+    };
+
+    // Chinese locale checks
+    state.settings.language = "zh";
+    assert.equal(localizeRecency("running"), "运行中");
+    assert.equal(localizeRecency("just now"), "刚刚");
+    assert.equal(localizeRecency("12m ago"), "12分钟前");
+    assert.equal(localizeRecency("3h ago"), "3小时前");
+    assert.equal(localizeRecency("2d ago"), "2天前");
+    assert.equal(localizeRecency("custom"), "custom");
+
+    assert.equal(fmtSyncBatchSummary(1, 1), "1 个会话 · 1 批");
+    assert.equal(fmtSyncBatchSummary(4, 2), "4 个会话 · 2 批");
+
+    assert.equal(JSON.parse(buildLabelTooltip(sampleLane)).footer, "共 2 个会话，点击查看明细");
+    assert.equal(
+      buildUnsummarizedSummary(sampleUnsummarized),
+      "[Codex] · 5 条提问 · 12 步 · /tmp/demo。暂未生成摘要 —— 可分配到工作线或点击同步。",
+    );
+    assert.equal(
+      buildUnsummarizedSummary({ ...sampleUnsummarized, cwd: "/tmp/price$&notes" }),
+      "[Codex] · 5 条提问 · 12 步 · /tmp/price$&notes。暂未生成摘要 —— 可分配到工作线或点击同步。",
+    );
+
+    state.dataSource = "mock";
+    state.days = [];
+    state.lines = [sampleLine];
+    state.unsummarized = [];
+    ensureMockWindowDays(14);
+    assert.equal(state.days.at(-1).full, "今天");
+    assert.equal(state.days[0].full, "Nov 1 · 周日");
+
+    state.contributions = sampleContrib;
+    const contribZh = renderContributionPopoverBody();
+    assert.ok(contribZh.includes("10月"), "zh contribution calendar missing month label");
+    assert.ok(contribZh.includes("<div>一</div>") && contribZh.includes("<div>五</div>"));
+
+    const popoverLayer = document.getElementById("popover-layer");
+    state.popover = { type: "line-menu", lineId: "line-1", top: 40, left: 40 };
+    renderPopoverLayer();
+    for (const label of ["紧急", "高", "中", "低", "无优先级", "进行中", "暂停", "已完成"]) {
+      assert.ok(popoverLayer.innerHTML.includes(label), `zh line-menu missing ${label}`);
+    }
+
+    state.popover = { type: "range-menu", top: 40, right: 320 };
+    renderPopoverLayer();
+    assert.ok(popoverLayer.innerHTML.includes("时间窗口"), "zh range-menu missing window label");
+
+    // English locale checks
+    state.settings.language = "en";
+    assert.equal(localizeRecency("running"), "running");
+    assert.equal(localizeRecency("just now"), "just now");
+    assert.equal(localizeRecency("12m ago"), "12m ago");
+    assert.equal(localizeRecency("3h ago"), "3h ago");
+    assert.equal(localizeRecency("2d ago"), "2d ago");
+
+    assert.equal(fmtSyncBatchSummary(1, 1), "1 session · 1 batch");
+    assert.equal(fmtSyncBatchSummary(4, 2), "4 sessions · 2 batches");
+
+    assert.equal(JSON.parse(buildLabelTooltip(sampleLane)).footer, "2 sessions. Click to see each one.");
+    assert.equal(
+      buildUnsummarizedSummary(sampleUnsummarized),
+      "[Codex] · 5 user prompts · 12 steps · /tmp/demo. Not summarized yet — assign to a Line or run Sync.",
+    );
+    assert.equal(
+      buildUnsummarizedSummary({ ...sampleUnsummarized, cwd: "/tmp/price$&notes" }),
+      "[Codex] · 5 user prompts · 12 steps · /tmp/price$&notes. Not summarized yet — assign to a Line or run Sync.",
+    );
+
+    state.days = [];
+    ensureMockWindowDays(14);
+    assert.equal(state.days.at(-1).full, "Today");
+    assert.equal(state.days[0].full, "Sun, Nov 1");
+
+    const contribEn = renderContributionPopoverBody();
+    assert.ok(contribEn.includes("Oct"), "en contribution calendar missing month label");
+    assert.ok(contribEn.includes("<div>Mon</div>") && contribEn.includes("<div>Fri</div>"));
+
+    state.popover = { type: "line-menu", lineId: "line-1", top: 40, left: 40 };
+    renderPopoverLayer();
+    for (const label of ["Urgent", "High", "Medium", "Low", "No priority", "Active", "Paused", "Done"]) {
+      assert.ok(popoverLayer.innerHTML.includes(label), `en line-menu missing ${label}`);
+    }
+
+    state.popover = { type: "range-menu", top: 40, right: 320 };
+    renderPopoverLayer();
+    assert.ok(popoverLayer.innerHTML.includes("Window"), "en range-menu missing window label");
+  } finally {
+    state.popover = prevPopover;
+    state.dataSource = prevDataSource;
+    state.days = prevDays;
+    state.selectedDayIdx = prevSelectedDayIdx;
+    state.contributions = prevContributions;
+    state.lines = prevLines;
+    state.unsummarized = prevUnsummarized;
+    state.settings.language = prevLang;
   }
 });

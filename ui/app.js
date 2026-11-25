@@ -337,6 +337,29 @@ const I18N = {
     lineScopeAddPlaceholder: "AI 归类范围说明（可选）",
     lineGuideText: "自动发现了 {n} 条工作线 — 可通过行内菜单或拖放合并相关线，或在设置中固定主线并补充范围说明，后续 Sync 会自动按此归类。",
     lineGuideAction: "管理工作线 →",
+    recencyRunning: "运行中",
+    recencyJustNow: "刚刚",
+    recencyMinAgo: "{n}分钟前",
+    recencyHourAgo: "{n}小时前",
+    recencyDayAgo: "{n}天前",
+    batchSingle: "批",
+    batchPlural: "批",
+    lineTooltipSessions: "共 {n} 个会话，点击查看明细",
+    userPromptsWord: "条提问",
+    unsummarizedFallback: "{meta}。暂未生成摘要 —— 可分配到工作线或点击同步。",
+    weekdaysShort: ["周日", "周一", "周二", "周三", "周四", "周五", "周六"],
+    contribMonths: ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"],
+    contribWeekdays: ["一", "", "三", "", "五", "", ""],
+    priorityUrgent: "紧急",
+    priorityHigh: "高",
+    priorityMedium: "中",
+    priorityLow: "低",
+    priorityNone: "无优先级",
+    statusActive: "进行中",
+    statusPaused: "暂停",
+    statusDone: "已完成",
+    prefsWindow: "时间窗口",
+    mockSyncStoppedAt: "刚刚通过归纳完成首中尾切片摘要并归入当前工作线。",
   },
   en: {
     navPlane: "Plane",
@@ -587,6 +610,29 @@ const I18N = {
     lineScopeAddPlaceholder: "AI scope note (optional)",
     lineGuideText: "Found {n} lines — merge related ones via the line menu or drag-and-drop, or pin & add scope notes in Settings so future Syncs follow your structure.",
     lineGuideAction: "Manage lines →",
+    recencyRunning: "running",
+    recencyJustNow: "just now",
+    recencyMinAgo: "{n}m ago",
+    recencyHourAgo: "{n}h ago",
+    recencyDayAgo: "{n}d ago",
+    batchSingle: "batch",
+    batchPlural: "batches",
+    lineTooltipSessions: "{n} sessions. Click to see each one.",
+    userPromptsWord: "user prompts",
+    unsummarizedFallback: "{meta}. Not summarized yet — assign to a Line or run Sync.",
+    weekdaysShort: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    contribMonths: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+    contribWeekdays: ["Mon", "", "Wed", "", "Fri", "", ""],
+    priorityUrgent: "Urgent",
+    priorityHigh: "High",
+    priorityMedium: "Medium",
+    priorityLow: "Low",
+    priorityNone: "No priority",
+    statusActive: "Active",
+    statusPaused: "Paused",
+    statusDone: "Done",
+    prefsWindow: "Window",
+    mockSyncStoppedAt: "Summarized via Head–Middle–Tail slicer and filed under this line.",
   },
 };
 
@@ -1250,24 +1296,23 @@ function lang() {
 
 function t(key, vars = undefined) {
   const dict = I18N[lang()] || I18N.en;
-  let str = dict[key] ?? I18N.en[key] ?? key;
-  if (vars) {
+  let val = dict[key] ?? I18N.en[key] ?? key;
+  if (vars && typeof val === "string") {
     for (const [k, v] of Object.entries(vars)) {
-      str = str.replaceAll(`{${k}}`, String(v));
+      val = val.replaceAll(`{${k}}`, () => String(v));
     }
   }
-  return str;
+  return val;
 }
 
 function localizeRecency(recency) {
   if (!recency) return "";
-  if (lang() !== "zh") return recency;
-  if (recency === "running") return "运行中";
-  if (recency === "just now") return "刚刚";
+  if (recency === "running") return t("recencyRunning");
+  if (recency === "just now") return t("recencyJustNow");
   const m = /^(\d+)([mhd])\s+ago$/.exec(recency);
   if (m) {
-    const unit = m[2] === "m" ? "分钟前" : m[2] === "h" ? "小时前" : "天前";
-    return `${m[1]}${unit}`;
+    const key = m[2] === "m" ? "recencyMinAgo" : m[2] === "h" ? "recencyHourAgo" : "recencyDayAgo";
+    return t(key, { n: m[1] });
   }
   return recency;
 }
@@ -1642,11 +1687,8 @@ async function loadSyncEstimate(silent = false) {
 }
 
 function fmtSyncBatchSummary(sessions, batches) {
-  if (lang() === "zh") {
-    return `${sessions} 个会话 · ${batches} 批`;
-  }
-  const sWord = sessions === 1 ? "session" : "sessions";
-  const bWord = batches === 1 ? "batch" : "batches";
+  const sWord = sessions === 1 ? t("sessionSingle") : t("sessionPlural");
+  const bWord = batches === 1 ? t("batchSingle") : t("batchPlural");
   return `${sessions} ${sWord} · ${batches} ${bWord}`;
 }
 
@@ -2113,7 +2155,7 @@ function bandProfile(sessionSpanLists, isSubLane = false) {
     }
   }
 
-  // Bridge zero-count gaps narrower than BAND_JOIN_PX (`避免出现掐腰`)
+  // Bridge zero-count gaps narrower than BAND_JOIN_PX to prevent pinched waists
   const bridged = [];
   for (let i = 0; i < rawSegs.length; i++) {
     const [a, b, cnt] = rawSegs[i];
@@ -2632,9 +2674,7 @@ function buildLabelTooltip(lane) {
     const footer =
       st.activeSessions.length === 1
         ? st.activeSessions[0].title
-        : lang() === "zh"
-        ? `共 ${st.activeSessions.length} 个会话，点击查看明细`
-        : `${st.activeSessions.length} sessions. Click to see each one.`;
+        : t("lineTooltipSessions", { n: st.activeSessions.length });
     return JSON.stringify({
       kind: "line-summary",
       title: lane.label,
@@ -2732,13 +2772,11 @@ function buildUnsummarizedSummary(u) {
   const parts = [];
   if (u.harness) parts.push(`[${harnessLabel(u.harness)}]`);
   if (typeof u.userInputCount === "number") {
-    parts.push(`${u.userInputCount} ${lang() === "zh" ? "条提问" : "user prompts"}`);
+    parts.push(`${u.userInputCount} ${t("userPromptsWord")}`);
   }
   parts.push(`${u.steps || 0} ${t("stepsWord")}`);
   if (u.cwd) parts.push(u.cwd);
-  return lang() === "zh"
-    ? `${parts.join(" · ")}。暂未生成摘要 —— 可分配到工作线或点击同步。`
-    : `${parts.join(" · ")}. Not summarized yet — assign to a Line or run Sync.`;
+  return t("unsummarizedFallback", { meta: parts.join(" · ") });
 }
 
 function resolveUpstreamBadge(depId) {
@@ -2773,9 +2811,9 @@ function ensureMockWindowDays(targetDays) {
   const prevLen = state.days.length || 7;
   if (prevLen === targetDays) return;
   const end = new Date("2026-11-14T12:00:00Z");
-  const wdEn = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const wdZh = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-  const moEn = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const isZh = lang() === "zh";
+  const weekdays = t("weekdaysShort");
+  const moEn = I18N.en.contribMonths;
   const nextDays = [];
   for (let i = 0; i < targetDays; i++) {
     const offsetFromEnd = targetDays - 1 - i;
@@ -2784,14 +2822,14 @@ function ensureMockWindowDays(targetDays) {
     const wd = d.getUTCDay();
     const dom = d.getUTCDate();
     const mo = moEn[d.getUTCMonth()];
+    const wdLabel = weekdays[wd];
     const isToday = offsetFromEnd === 0;
-    const isZh = lang() === "zh";
     nextDays.push({
       idx: i,
       isoDate: iso,
-      short: isZh ? `${mo} ${dom}` : `${wdEn[wd]} ${dom}`,
-      tiny: isZh ? `${dom}` : wdEn[wd],
-      full: isToday ? (isZh ? "今天" : "Today") : isZh ? `${mo} ${dom} · ${wdZh[wd]}` : `${wdEn[wd]}, ${mo} ${dom}`,
+      short: isZh ? `${mo} ${dom}` : `${wdLabel} ${dom}`,
+      tiny: isZh ? `${dom}` : wdLabel,
+      full: isToday ? t("today") : isZh ? `${mo} ${dom} · ${wdLabel}` : `${wdLabel}, ${mo} ${dom}`,
       isToday,
     });
   }
@@ -3171,11 +3209,8 @@ function renderContributionPopoverBody() {
   const rawDays = Array.isArray(state.contributions) ? state.contributions : [];
   if (rawDays.length === 0) return "";
 
-  const isZh = lang() === "zh";
-  const monthNames = isZh
-    ? ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"]
-    : ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const weekdays = isZh ? ["一", "", "三", "", "五", "", ""] : ["Mon", "", "Wed", "", "Fri", "", ""];
+  const monthNames = t("contribMonths");
+  const weekdays = t("contribWeekdays");
 
   const leadPad = Math.max(0, Number(rawDays[0]?.weekday || 0));
   const padded = [];
@@ -4728,32 +4763,18 @@ function renderPopoverLayer() {
   if (p.type === "line-menu") {
     const line = state.lines.find((l) => l.id === p.lineId);
     if (!line) return;
-    const priorities = isZh
-      ? [
-          { val: 1, label: "紧急", key: "1" },
-          { val: 2, label: "高", key: "2" },
-          { val: 3, label: "中", key: "3" },
-          { val: 4, label: "低", key: "4" },
-          { val: 0, label: "无优先级", key: "0" },
-        ]
-      : [
-          { val: 1, label: "Urgent", key: "1" },
-          { val: 2, label: "High", key: "2" },
-          { val: 3, label: "Medium", key: "3" },
-          { val: 4, label: "Low", key: "4" },
-          { val: 0, label: "No priority", key: "0" },
-        ];
-    const statuses = isZh
-      ? [
-          { val: "active", label: "进行中" },
-          { val: "paused", label: "暂停" },
-          { val: "done", label: "已完成" },
-        ]
-      : [
-          { val: "active", label: "Active" },
-          { val: "paused", label: "Paused" },
-          { val: "done", label: "Done" },
-        ];
+    const priorities = [
+      { val: 1, label: t("priorityUrgent"), key: "1" },
+      { val: 2, label: t("priorityHigh"), key: "2" },
+      { val: 3, label: t("priorityMedium"), key: "3" },
+      { val: 4, label: t("priorityLow"), key: "4" },
+      { val: 0, label: t("priorityNone"), key: "0" },
+    ];
+    const statuses = [
+      { val: "active", label: t("statusActive") },
+      { val: "paused", label: t("statusPaused") },
+      { val: "done", label: t("statusDone") },
+    ];
     const menuW = Math.min(214, window.innerWidth - 20);
     const top = Math.max(10, Math.min(window.innerHeight - 332, p.top));
     const left = Math.max(10, Math.min(window.innerWidth - menuW - 10, p.left));
@@ -4961,7 +4982,7 @@ function renderPopoverLayer() {
     layer.innerHTML = `
       <div class="horizon-popover ${hasCal ? "" : "is-compact"}" style="top:${top}px;left:${left}px">
         <div class="horizon-top ${hasCal ? "has-cal" : ""}">
-          <span class="prefs-inline-lbl">${escapeHtml(isZh ? "时间窗口" : "Window")}</span>
+          <span class="prefs-inline-lbl">${escapeHtml(t("prefsWindow"))}</span>
           <div class="mini-seg" role="tablist">
             ${opts
               .map(
@@ -5682,10 +5703,7 @@ async function runSyncBatches() {
           steps: u.steps,
           recency: u.running ? "running" : "just now",
           running: Boolean(u.running),
-          stoppedAt:
-            lang() === "zh"
-              ? "刚刚通过归纳完成首中尾切片摘要并归入当前工作线。"
-              : "Summarized via Head–Middle–Tail slicer and filed under this line.",
+          stoppedAt: t("mockSyncStoppedAt"),
           leftOpen: "",
           dependsOnId: null,
           hidden: false,
@@ -7565,11 +7583,19 @@ if (!shouldForceMock(initialUrlParams)) {
 
 export {
   applyPlaneResponse,
+  buildLabelTooltip,
   buildSyncButtonTooltip,
+  buildUnsummarizedSummary,
   DEFAULT_SETTINGS,
+  ensureMockWindowDays,
+  fmtSyncBatchSummary,
   fmtSyncUsageCompact,
+  I18N,
   isProcessorConfigured,
   loadSyncEstimate,
+  localizeRecency,
+  renderContributionPopoverBody,
+  renderPopoverLayer,
   renderSettingsView,
   renderSyncEstimateReadout,
   runSyncBatches,
