@@ -28,9 +28,11 @@ use crate::ingest::codex::is_codex_synthetic_block;
 use crate::ingest::dsh::extract_text_from_value;
 use crate::ingest::{stream_jsonl_lines, strip_delegation_envelope};
 use crate::model::{
-    AppSettings, INTERNAL_DIGEST_SENTINEL, ProcessorTestResult, SyncBatchDoneDto,
-    SyncBatchPreviewItem, SyncFiledPreview, SyncStreamEvent, SyncSummaryDto,
+    AppSettings, CostUsdRangeDto, INTERNAL_DIGEST_SENTINEL, ProcessorTestResult, SyncBatchDoneDto,
+    SyncBatchPreviewItem, SyncEstimateDto, SyncFiledPreview, SyncStreamEvent, SyncSummaryDto,
+    SyncUsageDto,
 };
+use crate::pricing::{canonical_billing_provider, estimate_api_cost_usd};
 use crate::server::AppState;
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -325,7 +327,7 @@ pub async fn test_processor_connection(
 ) -> Result<ProcessorTestResult> {
     let started = Instant::now();
     let ping_prompt = "Respond with strictly valid JSON matching this schema and nothing else: {\"ok\": true, \"pong\": \"planar\"}";
-    let (reply, backend_used) = match run_llm_prompt(ping_prompt, settings, hydrated_path).await {
+    let output = match run_llm_prompt(ping_prompt, settings, hydrated_path).await {
         Ok(res) => res,
         Err(err) => {
             return Ok(ProcessorTestResult {
@@ -337,6 +339,17 @@ pub async fn test_processor_connection(
         }
     };
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let reply = match output.reply {
+        Ok(text) => text,
+        Err(err) => {
+            return Ok(ProcessorTestResult {
+                ok: false,
+                backend_used: output.backend_used,
+                latency_ms,
+                message: truncate_chars(&err.to_string(), 220),
+            });
+        }
+    };
 
     let ok = extract_json_object(&reply)
         .and_then(|s| serde_json::from_str::<Value>(s).ok())
@@ -345,7 +358,7 @@ pub async fn test_processor_connection(
     let preview = truncate_chars(&normalize_step_text(&reply), 120);
     Ok(ProcessorTestResult {
         ok,
-        backend_used,
+        backend_used: output.backend_used,
         latency_ms,
         message: if ok {
             format!("Connected ({preview})")
@@ -353,6 +366,13 @@ pub async fn test_processor_connection(
             format!("Unexpected reply: {preview}")
         },
     })
+}
+
+#[derive(Debug)]
+struct LlmPromptOutput {
+    reply: Result<String>,
+    backend_used: String,
+    usage: SyncUsageDto,
 }
 
 struct PreparedSession {
@@ -365,8 +385,19 @@ struct BatchRunResult {
     filed: Vec<SyncFiledPreview>,
     failed: usize,
     backend_used: Option<String>,
+    usage: Option<SyncUsageDto>,
     last_error: Option<String>,
     fatal: bool,
+}
+
+fn merge_opt_usage(acc: &mut Option<SyncUsageDto>, incoming: Option<&SyncUsageDto>) {
+    let Some(other) = incoming else {
+        return;
+    };
+    match acc {
+        Some(existing) => existing.merge_from(other),
+        None => *acc = Some(other.clone()),
+    }
 }
 
 fn is_fatal_processor_error(err: &PlanarError) -> bool {
@@ -571,6 +602,7 @@ async fn execute_prepared_batch(
             filed: Vec::new(),
             failed: batch.len(),
             backend_used: None,
+            usage: None,
             last_error: Some(unconfigured_processor_message(settings)),
             fatal: true,
         };
@@ -583,6 +615,7 @@ async fn execute_prepared_batch(
                 filed: Vec::new(),
                 failed: batch.len(),
                 backend_used: None,
+                usage: None,
                 last_error: Some(err.to_string()),
                 fatal: false,
             };
@@ -595,8 +628,7 @@ async fn execute_prepared_batch(
         build_batch_digest_prompt(batch, &catalog, settings)
     };
 
-    let (reply, backend_used) = match run_llm_prompt(&prompt, settings, &state.hydrated_path).await
-    {
+    let main_out = match run_llm_prompt(&prompt, settings, &state.hydrated_path).await {
         Ok(res) => res,
         Err(err) => {
             let fatal = is_fatal_processor_error(&err);
@@ -604,6 +636,25 @@ async fn execute_prepared_batch(
                 filed: Vec::new(),
                 failed: batch.len(),
                 backend_used: None,
+                usage: None,
+                last_error: Some(err.to_string()),
+                fatal,
+            };
+        }
+    };
+
+    let backend_used = main_out.backend_used;
+    let mut batch_usage = main_out.usage;
+
+    let main_reply = match main_out.reply {
+        Ok(text) => text,
+        Err(err) => {
+            let fatal = is_fatal_processor_error(&err);
+            return BatchRunResult {
+                filed: Vec::new(),
+                failed: batch.len(),
+                backend_used: Some(backend_used),
+                usage: Some(batch_usage),
                 last_error: Some(err.to_string()),
                 fatal,
             };
@@ -611,13 +662,14 @@ async fn execute_prepared_batch(
     };
 
     let expected_ids: Vec<String> = batch.iter().map(|p| p.cand.id.clone()).collect();
-    let mut parsed_map = match parse_batch_digest_json(&reply, &expected_ids) {
+    let mut parsed_map = match parse_batch_digest_json(&main_reply, &expected_ids) {
         Ok(m) => m,
         Err(err) => {
             return BatchRunResult {
                 filed: Vec::new(),
                 failed: batch.len(),
                 backend_used: Some(backend_used),
+                usage: Some(batch_usage),
                 last_error: Some(err.to_string()),
                 fatal: false,
             };
@@ -659,27 +711,32 @@ async fn execute_prepared_batch(
             let solo_prompt =
                 build_digest_prompt(&item.cand, &item.sliced, &refreshed_catalog, settings);
             match run_llm_prompt(&solo_prompt, settings, &state.hydrated_path).await {
-                Ok((solo_reply, _)) => match parse_digest_json(&solo_reply) {
-                    Ok(digest) => {
-                        match apply_digest_to_store(state, &item.cand, slice_hash, &digest).await {
-                            Ok(()) => {
-                                filed.push(SyncFiledPreview {
-                                    session_id: item.cand.id.clone(),
-                                    title: digest.title,
-                                    line_name: digest.suggested_line,
-                                });
-                            }
-                            Err(err) => {
-                                failed += 1;
-                                last_error = Some(err.to_string());
+                Ok(solo_out) => {
+                    batch_usage.merge_from(&solo_out.usage);
+                    match solo_out.reply.and_then(|reply| parse_digest_json(&reply)) {
+                        Ok(digest) => {
+                            match apply_digest_to_store(state, &item.cand, slice_hash, &digest)
+                                .await
+                            {
+                                Ok(()) => {
+                                    filed.push(SyncFiledPreview {
+                                        session_id: item.cand.id.clone(),
+                                        title: digest.title,
+                                        line_name: digest.suggested_line,
+                                    });
+                                }
+                                Err(err) => {
+                                    failed += 1;
+                                    last_error = Some(err.to_string());
+                                }
                             }
                         }
+                        Err(err) => {
+                            failed += 1;
+                            last_error = Some(err.to_string());
+                        }
                     }
-                    Err(err) => {
-                        failed += 1;
-                        last_error = Some(err.to_string());
-                    }
-                },
+                }
                 Err(err) => {
                     failed += 1;
                     last_error = Some(err.to_string());
@@ -692,6 +749,7 @@ async fn execute_prepared_batch(
         filed,
         failed,
         backend_used: Some(backend_used),
+        usage: Some(batch_usage),
         last_error,
         fatal: false,
     }
@@ -739,6 +797,7 @@ pub async fn sync_pending_sessions_in_scope(
         skipped: 0,
         backend_used: default_backend,
         last_error: None,
+        usage: None,
     };
 
     if candidates.is_empty() {
@@ -761,6 +820,7 @@ pub async fn sync_pending_sessions_in_scope(
         if let Some(backend) = res.backend_used {
             summary.backend_used = backend;
         }
+        merge_opt_usage(&mut summary.usage, res.usage.as_ref());
         summary.processed += res.filed.len();
         summary.failed += res.failed;
         if res.last_error.is_some() {
@@ -775,6 +835,80 @@ pub async fn sync_pending_sessions_in_scope(
     }
 
     Ok(summary)
+}
+
+/// Estimates pending `Sync` token usage and API USD cost strictly read-only without calling any
+/// LLM, creating a missing database, or mutating SQLite.
+pub async fn estimate_sync_cost(
+    state: &AppState,
+    force_all: bool,
+    limit_override: Option<usize>,
+    scope: Option<SyncScope>,
+) -> Result<SyncEstimateDto> {
+    let loaded = state
+        .with_store_readonly(move |store| {
+            let settings = store.get_settings()?;
+            let slice_hash = compute_slice_config_hash(&settings);
+            let catalog = store.list_line_catalog()?;
+            let candidates = store.load_sync_candidates_in_scope(
+                &settings,
+                &slice_hash,
+                force_all,
+                limit_override,
+                scope.as_ref(),
+                Local::now(),
+            )?;
+            Ok((settings, catalog, candidates))
+        })
+        .await?;
+
+    let Some((settings, catalog, candidates)) = loaded else {
+        return Ok(estimate_prepared_batches_cost(
+            &[],
+            &[],
+            &AppSettings::default(),
+        ));
+    };
+
+    let existing: Vec<SyncCandidate> = candidates
+        .into_iter()
+        .filter(|cand| Path::new(&cand.source_path).exists())
+        .collect();
+
+    if existing.is_empty() {
+        return Ok(estimate_prepared_batches_cost(&[], &catalog, &settings));
+    }
+
+    let min_inputs = usize::try_from(settings.fewest_user_inputs.max(FEWEST_USER_INPUTS_MIN))
+        .unwrap_or(usize::MAX);
+    let cfg_clone = settings.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for cand in existing {
+            let Ok(sliced) =
+                slice_trajectory_file(Path::new(&cand.source_path), &cand.harness, &cfg_clone)
+            else {
+                continue;
+            };
+            if sliced.user_count < min_inputs && cand.line_id.is_none() {
+                continue;
+            }
+            let approx_chars = estimate_sliced_chars(&sliced);
+            out.push(PreparedSession {
+                cand,
+                sliced,
+                approx_chars,
+            });
+        }
+        out
+    })
+    .await
+    .map_err(|err| PlanarError::TaskJoin(err.to_string()))?;
+
+    let batches = chunk_prepared_into_batches(prepared, settings.sync_batch_limit);
+    Ok(estimate_prepared_batches_cost(
+        &batches, &catalog, &settings,
+    ))
 }
 
 /// Spawns a multi-session batch streaming `Sync` coordinator scoped to `scope`, emitting NDJSON
@@ -828,6 +962,7 @@ async fn run_sync_stream_coordinator(
                 skipped: 0,
                 backend_used: "error".to_string(),
                 last_error: Some(err.to_string()),
+                usage: None,
             };
             state.record_last_sync(fallback_summary.clone());
             if let Ok(plane) = state.build_plane_snapshot(days, anchor).await {
@@ -852,6 +987,7 @@ async fn run_sync_stream_coordinator(
         skipped: 0,
         backend_used: default_backend.clone(),
         last_error: None,
+        usage: None,
     };
 
     if candidates.is_empty() {
@@ -921,6 +1057,8 @@ async fn run_sync_stream_coordinator(
                 completed,
                 total: total_items,
                 backend_used: summary.backend_used.clone(),
+                batch_usage: None,
+                cumulative_usage: summary.usage.clone(),
                 plane,
             }));
             if tx.send(ev).await.is_err() {
@@ -982,6 +1120,7 @@ async fn run_sync_stream_coordinator(
                             filed: Vec::new(),
                             failed: cur_batch_len,
                             backend_used: None,
+                            usage: None,
                             last_error: Some(join_err.to_string()),
                             fatal: false,
                         },
@@ -993,11 +1132,13 @@ async fn run_sync_stream_coordinator(
         let batch_processed = batch_res.filed.len();
         let batch_failed = batch_res.failed;
         let batch_error = batch_res.last_error.clone();
+        let batch_usage = batch_res.usage;
         let is_fatal = batch_res.fatal;
 
         if let Some(backend) = batch_res.backend_used {
             summary.backend_used = backend;
         }
+        merge_opt_usage(&mut summary.usage, batch_usage.as_ref());
         summary.processed += batch_processed;
         summary.failed += batch_failed;
         if batch_res.last_error.is_some() {
@@ -1025,6 +1166,8 @@ async fn run_sync_stream_coordinator(
                 completed,
                 total: total_items,
                 backend_used: summary.backend_used.clone(),
+                batch_usage,
+                cumulative_usage: summary.usage.clone(),
                 plane,
             }));
             if tx.send(done_ev).await.is_err() {
@@ -1067,6 +1210,7 @@ pub async fn regroup_discovered_lines(state: &AppState) -> Result<SyncSummaryDto
             skipped: 0,
             backend_used: default_backend,
             last_error: None,
+            usage: None,
         });
     }
 
@@ -1077,7 +1221,8 @@ pub async fn regroup_discovered_lines(state: &AppState) -> Result<SyncSummaryDto
     }
 
     let prompt = build_regroup_prompt(&items, &catalog, &settings);
-    let (reply, backend_used) = run_llm_prompt(&prompt, &settings, &state.hydrated_path).await?;
+    let out = run_llm_prompt(&prompt, &settings, &state.hydrated_path).await?;
+    let reply = out.reply?;
     let assignments = parse_regroup_json(&reply)?;
     let moved = state
         .with_store(move |store| store.apply_regroup_mapping(&assignments))
@@ -1087,9 +1232,259 @@ pub async fn regroup_discovered_lines(state: &AppState) -> Result<SyncSummaryDto
         processed: moved,
         failed: 0,
         skipped: items.len().saturating_sub(moved),
-        backend_used,
+        backend_used: out.backend_used,
         last_error: None,
+        usage: Some(out.usage),
     })
+}
+
+/// Estimates token count for arbitrary text using an ASCII/CJK-aware offline heuristic
+/// (`~4.0 chars/tok` ASCII/Latin, `~1.6 chars/tok` CJK/East Asian).
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn estimate_text_tokens(text: &str) -> u64 {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut cjk_chars = 0_u64;
+    let mut other_chars = 0_u64;
+    for ch in text.chars() {
+        if is_cjk_char(ch) {
+            cjk_chars += 1;
+        } else {
+            other_chars += 1;
+        }
+    }
+    let est = (other_chars as f64) / 4.0 + (cjk_chars as f64) / 1.6;
+    est.ceil().max(1.0) as u64
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3000..=0x30FF // CJK punctuation, Hiragana, Katakana
+            | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
+            | 0x4E00..=0x9FFF // CJK Unified Ideographs
+            | 0xAC00..=0xD7AF // Hangul Syllables
+            | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+            | 0xFF00..=0xFFEF // Halfwidth and Fullwidth Forms
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkingTier {
+    None,
+    Light,
+    High,
+}
+
+fn thinking_tier_for_model(raw_model: &str) -> ThinkingTier {
+    let lower = raw_model.trim().to_ascii_lowercase();
+    let m = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if m.is_empty()
+        || m.contains("flash-lite")
+        || m.contains("nano")
+        || m.starts_with("gpt-4o")
+        || m.starts_with("gpt-4.1")
+        || m.contains("haiku")
+        || m == "deepseek-chat"
+        || m.contains("non-reasoning")
+    {
+        return ThinkingTier::None;
+    }
+    if m.starts_with("gemini-4-")
+        || m.starts_with("gemini-3-pro")
+        || m.starts_with("gemini-3.1-pro")
+        || m.starts_with("gemini-2.5-pro")
+        || m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+        || m.starts_with("gpt-5-pro")
+        || m.starts_with("gpt-6-astra")
+        || m.starts_with("gpt-6-rosalind")
+        || m.starts_with("gpt-6-cyber")
+        || m.contains("reasoner")
+        || m.contains("thinking")
+        || m.contains("-reasoning")
+    {
+        return ThinkingTier::High;
+    }
+    if (m.starts_with("gemini-") && m.contains("flash") && !m.starts_with("gemini-2.0"))
+        || m.starts_with("gpt-5")
+        || m.starts_with("gpt-6")
+        || m.starts_with("claude-opus-4")
+        || m.starts_with("claude-sonnet-4")
+        || m.starts_with("deepseek-v4-pro")
+    {
+        return ThinkingTier::Light;
+    }
+    ThinkingTier::None
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_BILLING_PROVIDER_OVERRIDE: Option<&'static str>;
+}
+
+/// Derives billing provider attribution from BOTH the configured provider ID and the resolved
+/// HTTP endpoint URL. Only requests targeting a known provider's official HTTPS host inherit that
+/// vendor's USD list pricing; overridden local or proxy Base URLs return `None` so tokens are
+/// retained without fabricating vendor USD spend.
+fn resolve_billing_provider(provider: &str, resolved_base: &str) -> Option<&'static str> {
+    #[cfg(test)]
+    if let Ok(Some(override_provider)) = TEST_BILLING_PROVIDER_OVERRIDE.try_with(|p| *p) {
+        return Some(override_provider);
+    }
+
+    let canonical = canonical_billing_provider(provider)?;
+    let spec = api_provider(provider)?;
+    let target_url = reqwest::Url::parse(resolved_base.trim()).ok()?;
+    if target_url.scheme() != "https" {
+        return None;
+    }
+    let target_host = target_url.host_str()?.to_ascii_lowercase();
+    let default_url = reqwest::Url::parse(spec.default_base.trim()).ok()?;
+    let official_host = default_url.host_str()?.to_ascii_lowercase();
+    if target_host == official_host
+        || (canonical == "moonshotai" && target_host == "api.moonshot.ai")
+    {
+        Some(canonical)
+    } else {
+        None
+    }
+}
+
+fn active_processor_model(settings: &AppSettings) -> (bool, String, Option<&'static str>) {
+    if settings.processor_mode == "api" {
+        let provider = settings.api_provider.trim().to_ascii_lowercase();
+        let spec = api_provider(&provider);
+        let model = if settings.api_model.trim().is_empty() {
+            spec.map_or_default(|s| s.default_model.clone())
+        } else {
+            settings.api_model.trim().to_string()
+        };
+        let resolved_base = if settings.api_base_url.trim().is_empty() {
+            spec.map_or("", |s| s.default_base.as_str())
+        } else {
+            settings.api_base_url.trim()
+        };
+        let billing_provider = resolve_billing_provider(&provider, resolved_base);
+        (false, model, billing_provider)
+    } else {
+        (true, settings.cli_model.trim().to_string(), None)
+    }
+}
+
+fn estimate_prepared_batches_cost(
+    batches: &[Vec<PreparedSession>],
+    catalog: &[LineCatalogEntry],
+    settings: &AppSettings,
+) -> SyncEstimateDto {
+    let (is_local_cli, model, billing_provider_opt) = active_processor_model(settings);
+    let backend = planned_backend_label(settings);
+    let session_count: usize = batches.iter().map(Vec::len).sum();
+    let batch_count = batches.len();
+
+    if session_count == 0 {
+        return SyncEstimateDto {
+            session_count: 0,
+            batch_count: 0,
+            estimated_input_tokens: 0,
+            estimated_output_tokens: 0,
+            estimated_thinking_tokens: 0,
+            estimated_cost_usd_range: None,
+            model,
+            backend,
+            is_local_cli,
+        };
+    }
+
+    let tier = thinking_tier_for_model(&model);
+    let mut est_input = 0_u64;
+    let mut out_mid = 0_u64;
+    let mut think_mid = 0_u64;
+    let mut cost_low_total = 0.0_f64;
+    let mut cost_high_total = 0.0_f64;
+    let mut all_batches_priced = !is_local_cli && billing_provider_opt.is_some();
+
+    for batch in batches {
+        let prompt = if batch.len() == 1 {
+            build_digest_prompt(&batch[0].cand, &batch[0].sliced, catalog, settings)
+        } else {
+            build_batch_digest_prompt(batch, catalog, settings)
+        };
+        let batch_input = estimate_text_tokens(&prompt);
+        est_input = est_input.saturating_add(batch_input);
+
+        let n = u64::try_from(batch.len()).unwrap_or(1);
+        let batch_out_low = n.saturating_mul(120).saturating_add(40);
+        let batch_out_mid = n.saturating_mul(180).saturating_add(60);
+        let batch_out_high = n.saturating_mul(260).saturating_add(90);
+        out_mid = out_mid.saturating_add(batch_out_mid);
+
+        let (batch_think_low, batch_think_mid, batch_think_high) = match tier {
+            ThinkingTier::High => (
+                n.saturating_mul(200).saturating_add(150),
+                n.saturating_mul(400).saturating_add(250),
+                n.saturating_mul(650).saturating_add(400),
+            ),
+            ThinkingTier::Light => (
+                n.saturating_mul(80).saturating_add(60),
+                n.saturating_mul(180).saturating_add(120),
+                n.saturating_mul(320).saturating_add(220),
+            ),
+            ThinkingTier::None => (0, 0, 0),
+        };
+        think_mid = think_mid.saturating_add(batch_think_mid);
+
+        // Price each batch individually so multi-batch runs do not falsely cross
+        // single-request long-context pricing tiers (e.g. Gemini 2.5 Pro >200K).
+        if all_batches_priced {
+            let batch_in_low = batch_input.saturating_mul(9) / 10;
+            let batch_in_high = batch_input.saturating_mul(11).div_ceil(10);
+            let lo = estimate_api_cost_usd(
+                billing_provider_opt,
+                Some(&model),
+                batch_in_low,
+                0,
+                0,
+                batch_out_low,
+                batch_think_low,
+            );
+            let hi = estimate_api_cost_usd(
+                billing_provider_opt,
+                Some(&model),
+                batch_in_high,
+                0,
+                0,
+                batch_out_high,
+                batch_think_high,
+            );
+            if let (Some(lo), Some(hi)) = (lo, hi) {
+                cost_low_total += lo.min(hi);
+                cost_high_total += lo.max(hi);
+            } else {
+                all_batches_priced = false;
+            }
+        }
+    }
+
+    let estimated_cost_usd_range = all_batches_priced.then_some(CostUsdRangeDto {
+        low: cost_low_total,
+        high: cost_high_total,
+    });
+
+    SyncEstimateDto {
+        session_count,
+        batch_count,
+        estimated_input_tokens: est_input,
+        estimated_output_tokens: out_mid,
+        estimated_thinking_tokens: think_mid,
+        estimated_cost_usd_range,
+        model,
+        backend,
+        is_local_cli,
+    }
 }
 
 fn planned_backend_label(settings: &AppSettings) -> String {
@@ -1148,7 +1543,7 @@ async fn run_llm_prompt(
     prompt: &str,
     settings: &AppSettings,
     hydrated_path: &OsStr,
-) -> Result<(String, String)> {
+) -> Result<LlmPromptOutput> {
     if settings.processor_mode == "api" {
         run_api_prompt(prompt, settings).await
     } else {
@@ -1160,7 +1555,7 @@ async fn run_cli_prompt(
     prompt: &str,
     settings: &AppSettings,
     hydrated_path: &OsStr,
-) -> Result<(String, String)> {
+) -> Result<LlmPromptOutput> {
     let candidates = resolve_cli_candidates(settings, hydrated_path)?;
     let guarded_prompt = format!(
         "{INTERNAL_DIGEST_SENTINEL} Read-only summarization request. Do NOT run shell commands, inspect files, or invoke tools. Reply ONLY with valid JSON.\n\n{prompt}"
@@ -1192,7 +1587,7 @@ async fn invoke_single_cli(
     guarded_prompt: &str,
     model_override: &str,
     hydrated_path: &OsStr,
-) -> Result<(String, String)> {
+) -> Result<LlmPromptOutput> {
     let workdir = std::env::temp_dir();
 
     let (output, codex_tmp_file) = match harness {
@@ -1322,7 +1717,13 @@ async fn invoke_single_cli(
         )));
     }
 
-    Ok((reply, format!("cli:{harness}")))
+    Ok(LlmPromptOutput {
+        reply: Ok(reply),
+        backend_used: format!("cli:{harness}"),
+        usage: SyncUsageDto::local_cli(
+            (!model_override.is_empty()).then(|| model_override.to_string()),
+        ),
+    })
 }
 
 fn resolve_cli_candidates(
@@ -1450,7 +1851,8 @@ fn resolve_api_endpoint<'a>(
     Ok((base, model))
 }
 
-async fn run_api_prompt(prompt: &str, settings: &AppSettings) -> Result<(String, String)> {
+async fn run_api_prompt(prompt: &str, settings: &AppSettings) -> Result<LlmPromptOutput> {
+    // Pre-dispatch configuration validation: keep these as hard `Err` with no usage record.
     let provider = settings.api_provider.trim().to_ascii_lowercase();
     let api_key = resolve_api_key(&provider, settings)?;
     let (base, model) = resolve_api_endpoint(&provider, settings)?;
@@ -1460,13 +1862,52 @@ async fn run_api_prompt(prompt: &str, settings: &AppSettings) -> Result<(String,
         .map_err(|err| PlanarError::External(format!("HTTP client init failed: {err}")))?;
 
     let backend_label = format!("api:{provider}");
-    let reply = match provider.as_str() {
-        "gemini" => call_gemini_api(&client, base, model, &api_key, prompt).await?,
-        "anthropic" => call_anthropic_api(&client, base, model, &api_key, prompt).await?,
-        other => call_openai_compat_api(&client, other, base, model, &api_key, prompt).await?,
+    let billing_provider = resolve_billing_provider(&provider, base);
+
+    let dispatched = match provider.as_str() {
+        "gemini" => call_gemini_api(&client, base, model, &api_key, prompt, billing_provider).await,
+        "anthropic" => {
+            call_anthropic_api(&client, base, model, &api_key, prompt, billing_provider).await
+        }
+        other => {
+            call_openai_compat_api(
+                &client,
+                other,
+                base,
+                model,
+                &api_key,
+                prompt,
+                billing_provider,
+            )
+            .await
+        }
     };
 
-    Ok((reply, backend_label))
+    match dispatched {
+        Ok((reply, parsed_usage)) => {
+            let usage = parsed_usage
+                .unwrap_or_else(|| SyncUsageDto::missing_api_usage(Some(model.to_string())));
+            Ok(LlmPromptOutput {
+                reply,
+                backend_used: backend_label,
+                usage,
+            })
+        }
+        Err(err) => {
+            // Keep pre-billing auth/config rejections fatal without fabricating usage; for any
+            // other post-dispatch failure (truncated body, invalid JSON, 5xx, etc.), preserve an
+            // incomplete usage record so multi-batch totals cannot masquerade as complete.
+            if is_fatal_processor_error(&err) {
+                Err(err)
+            } else {
+                Ok(LlmPromptOutput {
+                    reply: Err(err),
+                    backend_used: backend_label,
+                    usage: SyncUsageDto::missing_api_usage(Some(model.to_string())),
+                })
+            }
+        }
+    }
 }
 
 fn resolve_api_key(provider: &str, settings: &AppSettings) -> Result<String> {
@@ -1607,11 +2048,169 @@ fn extract_gemini_reply_text(val: &Value) -> Result<String> {
         }
     }
     if text.trim().is_empty() {
-        return Err(PlanarError::External(
+        Err(PlanarError::External(
             "Gemini API returned empty content".into(),
-        ));
+        ))
+    } else {
+        Ok(text)
     }
-    Ok(text)
+}
+
+fn json_u64(obj: &Value, key: &str) -> Option<u64> {
+    obj.get(key).and_then(|v| {
+        v.as_u64()
+            .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
+    })
+}
+
+fn build_api_usage(
+    billing_provider: Option<&str>,
+    model: &str,
+    input_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    output_tokens: u64,
+    thinking_tokens: u64,
+) -> Option<SyncUsageDto> {
+    let total_tokens = input_tokens
+        .saturating_add(cache_read_tokens)
+        .saturating_add(cache_write_tokens)
+        .saturating_add(output_tokens)
+        .saturating_add(thinking_tokens);
+    if total_tokens == 0 {
+        return None;
+    }
+    let cost_usd = billing_provider.and_then(|bp| {
+        estimate_api_cost_usd(
+            Some(bp),
+            Some(model),
+            input_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            output_tokens,
+            thinking_tokens,
+        )
+    });
+    Some(SyncUsageDto {
+        input_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        output_tokens,
+        thinking_tokens,
+        total_tokens,
+        cost_usd,
+        model: Some(model.to_string()),
+        is_local_cli: false,
+        api_calls: 1,
+        priced_calls: usize::from(cost_usd.is_some()),
+        incomplete: cost_usd.is_none(),
+    })
+}
+
+/// Extracts token usage and computes USD cost from a Gemini `generateContent` JSON response.
+#[must_use]
+pub fn parse_gemini_usage(val: &Value, model: &str) -> Option<SyncUsageDto> {
+    parse_gemini_usage_with_billing(val, Some("google"), model)
+}
+
+fn parse_gemini_usage_with_billing(
+    val: &Value,
+    billing_provider: Option<&str>,
+    model: &str,
+) -> Option<SyncUsageDto> {
+    let meta = val.get("usageMetadata")?;
+    let prompt_tokens = json_u64(meta, "promptTokenCount").unwrap_or(0);
+    let cache_read_tokens = json_u64(meta, "cachedContentTokenCount").unwrap_or(0);
+    let input_tokens = prompt_tokens.saturating_sub(cache_read_tokens);
+    let output_tokens = json_u64(meta, "candidatesTokenCount").unwrap_or(0);
+    let thinking_tokens = json_u64(meta, "thoughtsTokenCount").unwrap_or(0);
+    build_api_usage(
+        billing_provider,
+        model,
+        input_tokens,
+        cache_read_tokens,
+        0,
+        output_tokens,
+        thinking_tokens,
+    )
+}
+
+/// Extracts token usage and computes USD cost from an Anthropic `/messages` JSON response.
+#[must_use]
+pub fn parse_anthropic_usage(val: &Value, model: &str) -> Option<SyncUsageDto> {
+    parse_anthropic_usage_with_billing(val, Some("anthropic"), model)
+}
+
+fn parse_anthropic_usage_with_billing(
+    val: &Value,
+    billing_provider: Option<&str>,
+    model: &str,
+) -> Option<SyncUsageDto> {
+    let u = val.get("usage")?;
+    let input_tokens = json_u64(u, "input_tokens").unwrap_or(0);
+    let cache_read_tokens = json_u64(u, "cache_read_input_tokens").unwrap_or(0);
+    let cache_write_tokens = json_u64(u, "cache_creation_input_tokens").unwrap_or(0);
+    let output_tokens = json_u64(u, "output_tokens").unwrap_or(0);
+    build_api_usage(
+        billing_provider,
+        model,
+        input_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        output_tokens,
+        0,
+    )
+}
+
+/// Extracts token usage and computes USD cost from an OpenAI-compatible `/chat/completions`
+/// JSON response (including `prompt_tokens_details.cached_tokens`, `DeepSeek`
+/// `prompt_cache_hit_tokens`, and optional `completion_tokens_details.reasoning_tokens`).
+#[must_use]
+pub fn parse_openai_compat_usage(val: &Value, provider: &str, model: &str) -> Option<SyncUsageDto> {
+    parse_openai_compat_usage_with_billing(val, canonical_billing_provider(provider), model)
+}
+
+fn parse_openai_compat_usage_with_billing(
+    val: &Value,
+    billing_provider: Option<&str>,
+    model: &str,
+) -> Option<SyncUsageDto> {
+    let u = val.get("usage")?;
+    let cache_read_tokens = u
+        .get("prompt_tokens_details")
+        .and_then(|d| json_u64(d, "cached_tokens"))
+        .or_else(|| json_u64(u, "prompt_cache_hit_tokens"))
+        .unwrap_or(0);
+    let input_tokens = if let Some(prompt_tok) = json_u64(u, "prompt_tokens") {
+        prompt_tok.saturating_sub(cache_read_tokens)
+    } else if let Some(miss) = json_u64(u, "prompt_cache_miss_tokens") {
+        miss
+    } else {
+        json_u64(u, "input_tokens")
+            .unwrap_or(0)
+            .saturating_sub(cache_read_tokens)
+    };
+    let raw_completion = json_u64(u, "completion_tokens")
+        .or_else(|| json_u64(u, "output_tokens"))
+        .unwrap_or(0);
+    let thinking_tokens = u
+        .get("completion_tokens_details")
+        .and_then(|d| json_u64(d, "reasoning_tokens"))
+        .or_else(|| {
+            u.get("output_tokens_details")
+                .and_then(|d| json_u64(d, "reasoning_tokens"))
+        })
+        .unwrap_or(0);
+    let output_tokens = raw_completion.saturating_sub(thinking_tokens);
+    build_api_usage(
+        billing_provider,
+        model,
+        input_tokens,
+        cache_read_tokens,
+        0,
+        output_tokens,
+        thinking_tokens,
+    )
 }
 
 async fn call_gemini_api(
@@ -1620,13 +2219,17 @@ async fn call_gemini_api(
     model: &str,
     api_key: &str,
     prompt: &str,
-) -> Result<String> {
+    billing_provider: Option<&str>,
+) -> Result<(Result<String>, Option<SyncUsageDto>)> {
     let model_path = strip_gemini_models_prefix(model);
     let url = format!("{base}/models/{model_path}:generateContent?key={api_key}");
     let body = build_gemini_request_body(model_path, prompt);
 
     let val = send_json_post(client.post(&url).json(&body), "Gemini").await?;
-    extract_gemini_reply_text(&val)
+    // Capture reported usage before validating text content so billable empty replies are accounted for.
+    let usage = parse_gemini_usage_with_billing(&val, billing_provider, model);
+    let reply = extract_gemini_reply_text(&val);
+    Ok((reply, usage))
 }
 
 async fn call_anthropic_api(
@@ -1635,7 +2238,8 @@ async fn call_anthropic_api(
     model: &str,
     api_key: &str,
     prompt: &str,
-) -> Result<String> {
+    billing_provider: Option<&str>,
+) -> Result<(Result<String>, Option<SyncUsageDto>)> {
     let url = format!("{base}/messages");
     let body = json!({
         "model": model,
@@ -1654,6 +2258,7 @@ async fn call_anthropic_api(
     )
     .await?;
 
+    let usage = parse_anthropic_usage_with_billing(&val, billing_provider, model);
     let mut text = String::new();
     if let Some(blocks) = val.get("content").and_then(Value::as_array) {
         for block in blocks {
@@ -1664,12 +2269,14 @@ async fn call_anthropic_api(
             }
         }
     }
-    if text.trim().is_empty() {
-        return Err(PlanarError::External(
+    let reply = if text.trim().is_empty() {
+        Err(PlanarError::External(
             "Anthropic API returned empty content".into(),
-        ));
-    }
-    Ok(text)
+        ))
+    } else {
+        Ok(text)
+    };
+    Ok((reply, usage))
 }
 
 async fn call_openai_compat_api(
@@ -1679,7 +2286,8 @@ async fn call_openai_compat_api(
     model: &str,
     api_key: &str,
     prompt: &str,
-) -> Result<String> {
+    billing_provider: Option<&str>,
+) -> Result<(Result<String>, Option<SyncUsageDto>)> {
     let url = format!("{base}/chat/completions");
     let body = json!({
         "model": model,
@@ -1696,6 +2304,7 @@ async fn call_openai_compat_api(
     }
 
     let val = send_json_post(req, provider).await?;
+    let usage = parse_openai_compat_usage_with_billing(&val, billing_provider, model);
     let text = val
         .get("choices")
         .and_then(Value::as_array)
@@ -1706,12 +2315,14 @@ async fn call_openai_compat_api(
         .unwrap_or("")
         .to_string();
 
-    if text.trim().is_empty() {
-        return Err(PlanarError::External(format!(
+    let reply = if text.trim().is_empty() {
+        Err(PlanarError::External(format!(
             "`{provider}` API returned empty content"
-        )));
-    }
-    Ok(text)
+        )))
+    } else {
+        Ok(text)
+    };
+    Ok((reply, usage))
 }
 
 async fn send_json_post(req: reqwest::RequestBuilder, label: &str) -> Result<Value> {
@@ -2630,5 +3241,687 @@ mod tests {
         let (_, openrouter_model) =
             resolve_api_endpoint("openrouter", &openrouter_settings).unwrap();
         assert_eq!(openrouter_model, "google/gemini-4-hydrogen");
+    }
+
+    #[test]
+    fn api_usage_extractors_parse_gemini_anthropic_and_openai_fixtures() {
+        // Gemini: promptTokenCount (12_000) includes cachedContentTokenCount (2_000) -> 10_000 uncached.
+        // candidatesTokenCount (600) + thoughtsTokenCount (1_400) = 2_000 output tokens.
+        // gemini-4-hydrogen: $1.50/M in, $0.075/M cached, $7.50/M out.
+        // Cost = 0.01 * 1.50 ($0.015) + 0.002 * 0.075 ($0.00015) + 0.002 * 7.50 ($0.015) = $0.03015.
+        let gemini_resp = serde_json::json!({
+            "candidates": [{"content": {"parts": [{"text": "{}"}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 12_000,
+                "cachedContentTokenCount": 2_000,
+                "candidatesTokenCount": 600,
+                "thoughtsTokenCount": 1_400
+            }
+        });
+        let g = parse_gemini_usage(&gemini_resp, "gemini-4-hydrogen").unwrap();
+        assert_eq!(g.input_tokens, 10_000);
+        assert_eq!(g.cache_read_tokens, 2_000);
+        assert_eq!(g.cache_write_tokens, 0);
+        assert_eq!(g.output_tokens, 600);
+        assert_eq!(g.thinking_tokens, 1_400);
+        assert_eq!(g.total_tokens, 14_000);
+        assert!(!g.is_local_cli);
+        assert!((g.cost_usd.unwrap() - 0.03015).abs() < 1e-6);
+
+        // Anthropic: input_tokens is uncached; cache_read + cache_creation are additive.
+        // claude-sonnet-4-20250514: $3/M in, $0.30/M read, $3.75/M write, $15/M out.
+        // Cost = 0.01*3 ($0.03) + 0.1*0.30 ($0.03) + 0.02*3.75 ($0.075) + 0.001*15 ($0.015) = $0.15.
+        let anthropic_resp = serde_json::json!({
+            "content": [{"type": "text", "text": "{}"}],
+            "usage": {
+                "input_tokens": 10_000,
+                "cache_read_input_tokens": 100_000,
+                "cache_creation_input_tokens": 20_000,
+                "output_tokens": 1_000
+            }
+        });
+        let a = parse_anthropic_usage(&anthropic_resp, "claude-sonnet-4-20250514").unwrap();
+        assert_eq!(a.input_tokens, 10_000);
+        assert_eq!(a.cache_read_tokens, 100_000);
+        assert_eq!(a.cache_write_tokens, 20_000);
+        assert_eq!(a.output_tokens, 1_000);
+        assert_eq!(a.total_tokens, 131_000);
+        assert!((a.cost_usd.unwrap() - 0.15).abs() < 1e-6);
+
+        // OpenAI-compatible: prompt_tokens (50_000) includes cached_tokens (40_000) -> 10_000 uncached;
+        // completion_tokens (2_000) includes reasoning_tokens (1_200) -> 800 visible + 1_200 thinking.
+        // gpt-5: $1.25/M in, $0.125/M cached, $10/M out.
+        // Cost = 0.01*1.25 ($0.0125) + 0.04*0.125 ($0.005) + 0.002*10 ($0.02) = $0.0375.
+        let openai_resp = serde_json::json!({
+            "choices": [{"message": {"content": "{}"}}],
+            "usage": {
+                "prompt_tokens": 50_000,
+                "completion_tokens": 2_000,
+                "prompt_tokens_details": { "cached_tokens": 40_000 },
+                "completion_tokens_details": { "reasoning_tokens": 1_200 }
+            }
+        });
+        let o = parse_openai_compat_usage(&openai_resp, "openai", "gpt-5").unwrap();
+        assert_eq!(o.input_tokens, 10_000);
+        assert_eq!(o.cache_read_tokens, 40_000);
+        assert_eq!(o.output_tokens, 800);
+        assert_eq!(o.thinking_tokens, 1_200);
+        assert_eq!(o.total_tokens, 52_000);
+        assert!((o.cost_usd.unwrap() - 0.0375).abs() < 1e-6);
+
+        // Ollama reports tokens without fabricating cloud API USD spend.
+        let ollama = parse_openai_compat_usage(&openai_resp, "ollama", "qwen2.5:7b").unwrap();
+        assert_eq!(ollama.total_tokens, 52_000);
+        assert_eq!(ollama.cost_usd, None);
+
+        // Batch merging accumulates tokens and USD spend cleanly.
+        let mut combined = g.clone();
+        combined.merge_from(&o);
+        assert_eq!(combined.total_tokens, 66_000);
+        assert!((combined.cost_usd.unwrap() - (0.03015 + 0.0375)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn estimate_sync_cost_handles_ascii_cjk_thinking_models_and_local_cli_offline() {
+        // CJK (~1.6 chars/tok) yields significantly more tokens than ASCII (~4 chars/tok) of equal char length.
+        let ascii = "a".repeat(1_600);
+        let cjk = "测".repeat(1_600);
+        assert_eq!(estimate_text_tokens(&ascii), 400);
+        assert_eq!(estimate_text_tokens(&cjk), 1_000);
+
+        let mk_session = |id: &str, text: &str| PreparedSession {
+            cand: SyncCandidate {
+                id: id.to_string(),
+                harness: "codex".to_string(),
+                source_path: format!("/tmp/{id}.jsonl"),
+                step_count: 8,
+                user_input_count: 4,
+                first_user_prompt: text.to_string(),
+                cwd: Some("/Users/demo/planar".to_string()),
+                line_id: None,
+            },
+            sliced: SlicedTrajectory {
+                total_steps: 4,
+                user_count: 2,
+                head: vec![SlicedStep {
+                    index: 1,
+                    role: "user",
+                    text: text.to_string(),
+                }],
+                middle_users: Vec::new(),
+                tail: vec![SlicedStep {
+                    index: 4,
+                    role: "agent",
+                    text: text.to_string(),
+                }],
+            },
+            approx_chars: text.len() * 2 + 240,
+        };
+
+        let ascii_batch = vec![vec![mk_session("codex:ascii", &ascii)]];
+        let cjk_batch = vec![vec![mk_session("codex:cjk", &cjk)]];
+
+        let gemini_settings = AppSettings {
+            processor_configured: true,
+            processor_mode: "api".to_string(),
+            api_provider: "gemini".to_string(),
+            api_model: "gemini-4-hydrogen".to_string(),
+            ..AppSettings::default()
+        };
+        let ascii_est = estimate_prepared_batches_cost(&ascii_batch, &[], &gemini_settings);
+        let cjk_est = estimate_prepared_batches_cost(&cjk_batch, &[], &gemini_settings);
+        assert_eq!(ascii_est.session_count, 1);
+        assert_eq!(ascii_est.batch_count, 1);
+        assert!(!ascii_est.is_local_cli);
+        assert!(ascii_est.estimated_thinking_tokens > 0);
+        assert!(cjk_est.estimated_input_tokens > ascii_est.estimated_input_tokens);
+        let range = cjk_est.estimated_cost_usd_range.unwrap();
+        assert!(range.low > 0.0 && range.high >= range.low);
+
+        // Non-thinking model (`gemini-3.5-flash-lite`) estimates 0 thinking tokens and lower cost.
+        let lite_settings = AppSettings {
+            api_model: "gemini-3.5-flash-lite".to_string(),
+            ..gemini_settings
+        };
+        let lite_est = estimate_prepared_batches_cost(&cjk_batch, &[], &lite_settings);
+        assert_eq!(lite_est.estimated_thinking_tokens, 0);
+        assert!(
+            lite_est.estimated_cost_usd_range.unwrap().high
+                < cjk_est.estimated_cost_usd_range.unwrap().low
+        );
+
+        // Local CLI mode reports tokens/batches honestly with `is_local_cli = true` and no USD range.
+        let cli_settings = AppSettings {
+            processor_configured: true,
+            processor_mode: "cli".to_string(),
+            cli_harness: "codex".to_string(),
+            ..AppSettings::default()
+        };
+        let cli_est = estimate_prepared_batches_cost(&ascii_batch, &[], &cli_settings);
+        assert!(cli_est.is_local_cli);
+        assert_eq!(cli_est.estimated_cost_usd_range, None);
+        assert_eq!(cli_est.backend, "cli:codex");
+
+        // Generic `openai-compatible` gateway using `gpt-4o-mini` retains token estimates
+        // without fabricating OpenAI USD spend.
+        let compat_settings = AppSettings {
+            processor_configured: true,
+            processor_mode: "api".to_string(),
+            api_provider: "openai-compatible".to_string(),
+            api_base_url: "http://127.0.0.1:8000/v1".to_string(),
+            api_model: "gpt-4o-mini".to_string(),
+            ..AppSettings::default()
+        };
+        let compat_est = estimate_prepared_batches_cost(&ascii_batch, &[], &compat_settings);
+        assert!(!compat_est.is_local_cli);
+        assert!(compat_est.estimated_input_tokens > 0);
+        assert_eq!(compat_est.estimated_cost_usd_range, None);
+    }
+
+    #[test]
+    fn estimate_sync_cost_prices_multi_batch_runs_per_batch_without_crossing_aggregate_tier() {
+        // 20 single-session batches of ~15K input tokens each (~300K aggregate) on `gemini-2.5-pro`
+        // (whose >200K single-request tier doubles input from $1.25/M to $2.50/M and output from $10/M to $15/M).
+        // Each individual batch is ~15K input (< 200K), so total cost MUST stay at base tier (20 * single-batch).
+        let text = "x".repeat(29_000); // ~14.5K input tokens across head + tail
+        let mk_batch = |idx: usize| {
+            vec![PreparedSession {
+                cand: SyncCandidate {
+                    id: format!("codex:b{idx}"),
+                    harness: "codex".to_string(),
+                    source_path: format!("/tmp/b{idx}.jsonl"),
+                    step_count: 4,
+                    user_input_count: 3,
+                    first_user_prompt: "Analyze batch".to_string(),
+                    cwd: Some("/Users/demo/planar".to_string()),
+                    line_id: None,
+                },
+                sliced: SlicedTrajectory {
+                    total_steps: 2,
+                    user_count: 1,
+                    head: vec![SlicedStep {
+                        index: 1,
+                        role: "user",
+                        text: text.clone(),
+                    }],
+                    middle_users: Vec::new(),
+                    tail: vec![SlicedStep {
+                        index: 2,
+                        role: "agent",
+                        text: text.clone(),
+                    }],
+                },
+                approx_chars: text.len() * 2 + 240,
+            }]
+        };
+        let settings = AppSettings {
+            processor_configured: true,
+            processor_mode: "api".to_string(),
+            api_provider: "gemini".to_string(),
+            api_model: "gemini-2.5-pro".to_string(),
+            sync_batch_limit: 1,
+            ..AppSettings::default()
+        };
+
+        let one_batch = vec![mk_batch(0)];
+        let twenty_batches: Vec<_> = (0..20).map(mk_batch).collect();
+
+        let single_est = estimate_prepared_batches_cost(&one_batch, &[], &settings);
+        let multi_est = estimate_prepared_batches_cost(&twenty_batches, &[], &settings);
+        assert_eq!(multi_est.batch_count, 20);
+        assert!(
+            multi_est.estimated_input_tokens > 250_000,
+            "aggregate tokens should exceed 200K tier threshold: {}",
+            multi_est.estimated_input_tokens
+        );
+
+        let r1 = single_est.estimated_cost_usd_range.unwrap();
+        let r20 = multi_est.estimated_cost_usd_range.unwrap();
+        assert!(
+            (r20.low - r1.low * 20.0).abs() < 1e-6,
+            "20-batch low cost ({}) should equal 20 * 1-batch low ({})",
+            r20.low,
+            r1.low * 20.0
+        );
+        assert!(
+            (r20.high - r1.high * 20.0).abs() < 1e-6,
+            "20-batch high cost ({}) should equal 20 * 1-batch high ({})",
+            r20.high,
+            r1.high * 20.0
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_preserves_empty_response_usage_and_marks_incomplete_coverage() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tempfile::TempDir;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_ref = calls.clone();
+        let mock_api = Router::new().route(
+            "/models/{model_action}",
+            post(move || {
+                let c = calls_ref.clone();
+                async move {
+                    match c.fetch_add(1, Ordering::SeqCst) {
+                        // Call 1: batch returns digest for s1 only (omits s2 & s3) with priced usageMetadata.
+                        // gemini-4-hydrogen: 10K in ($0.015) + 1K out ($0.0075) = $0.0225.
+                        0 => Json(serde_json::json!({
+                            "candidates": [{"content": {"parts": [{"text": "{\"digests\":{\"codex:s1\":{\"title\":\"Session 1\",\"stoppedAt\":\"Done 1\",\"leftOpen\":\"\",\"suggestedLine\":\"planar\",\"isOneOff\":false}}}"}]}}],
+                            "usageMetadata": {
+                                "promptTokenCount": 10_000,
+                                "candidatesTokenCount": 1_000
+                            }
+                        })),
+                        // Call 2 (fallback s2): empty content BUT still reports billable usageMetadata!
+                        // gemini-4-hydrogen: 5K in ($0.0075) + 2K thinking ($0.015) = $0.0225.
+                        1 => Json(serde_json::json!({
+                            "candidates": [{"content": {"parts": [{"text": ""}]}}],
+                            "usageMetadata": {
+                                "promptTokenCount": 5_000,
+                                "candidatesTokenCount": 0,
+                                "thoughtsTokenCount": 2_000
+                            }
+                        })),
+                        // Call 3 (fallback s3): valid digest WITHOUT usageMetadata.
+                        _ => Json(serde_json::json!({
+                            "candidates": [{"content": {"parts": [{"text": "{\"title\":\"Session 3\",\"stoppedAt\":\"Done 3\",\"leftOpen\":\"\",\"suggestedLine\":\"planar\",\"isOneOff\":false}"}]}}]
+                        })),
+                    }
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_api).await;
+        });
+
+        let dir = TempDir::new().unwrap();
+        let roots = crate::env::HarnessRoots {
+            claude_projects: dir.path().join("claude"),
+            codex_sessions: dir.path().join("codex").join("sessions"),
+            codex_archived: dir.path().join("codex").join("archived_sessions"),
+            antigravity_brain: dir.path().join("antigravity"),
+            dsh_sessions: dir.path().join("dsh").join("sessions"),
+        };
+        let sess_dir = roots.codex_sessions.join("2026").join("11").join("25");
+        fs::create_dir_all(&sess_dir).unwrap();
+        let now = Local::now();
+        let t1 = (now - chrono::Duration::minutes(15)).to_rfc3339();
+        let t2 = (now - chrono::Duration::minutes(12)).to_rfc3339();
+        let t3 = (now - chrono::Duration::minutes(9)).to_rfc3339();
+        for idx in 1..=3 {
+            fs::write(
+                sess_dir.join(format!("rollout-{idx}.jsonl")),
+                format!(
+                    concat!(
+                        "{{\"timestamp\":\"{t1}\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"s{idx}\",\"cwd\":\"/tmp/ws\",\"source\":\"vscode\"}}}}\n",
+                        "{{\"timestamp\":\"{t1}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 1 s{idx}\"}}]}}}}\n",
+                        "{{\"timestamp\":\"{t2}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 2 s{idx}\"}}]}}}}\n",
+                        "{{\"timestamp\":\"{t3}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 3 s{idx}\"}}]}}}}\n"
+                    ),
+                    t1 = t1,
+                    t2 = t2,
+                    t3 = t3,
+                    idx = idx,
+                ),
+            )
+            .unwrap();
+        }
+
+        let db_path = dir.path().join("planar.db");
+        {
+            let mut store = crate::db::Store::open(&db_path).unwrap();
+            crate::ingest::scan_all_harnesses(&mut store, &roots).unwrap();
+            let settings = AppSettings {
+                processor_configured: true,
+                processor_mode: "api".to_string(),
+                api_provider: "gemini".to_string(),
+                api_base_url: format!("http://{addr}"),
+                api_model: "gemini-4-hydrogen".to_string(),
+                api_key: "test-key".to_string(),
+                sync_batch_limit: 4,
+                ..AppSettings::default()
+            };
+            store.save_settings(&settings).unwrap();
+        }
+
+        let state = AppState::new(db_path, roots);
+        let summary = TEST_BILLING_PROVIDER_OVERRIDE
+            .scope(Some("google"), async {
+                sync_pending_sessions_in_scope(&state, false, None, None).await
+            })
+            .await
+            .unwrap();
+        server_task.abort();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(summary.processed, 2);
+        assert_eq!(summary.failed, 1);
+        let usage = summary.usage.expect("expected accumulated usage");
+        assert_eq!(usage.api_calls, 3);
+        assert_eq!(usage.priced_calls, 2);
+        assert!(
+            usage.incomplete,
+            "missing usage on call 3 must mark run incomplete"
+        );
+        assert_eq!(usage.input_tokens, 15_000);
+        assert_eq!(usage.output_tokens, 1_000);
+        assert_eq!(usage.thinking_tokens, 2_000);
+        assert_eq!(usage.total_tokens, 18_000);
+        assert!(
+            (usage.cost_usd.unwrap() - 0.045).abs() < 1e-6,
+            "expected combined cost $0.045 from call 1 + empty-content call 2, got {:?}",
+            usage.cost_usd
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_marks_malformed_json_response_incomplete_and_keeps_pre_dispatch_errors_separate()
+    {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        use axum::Router;
+        use axum::http::{StatusCode, header};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use tempfile::TempDir;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_ref = calls.clone();
+        let mock_api = Router::new().route(
+            "/models/{model_action}",
+            post(move || {
+                let c = calls_ref.clone();
+                async move {
+                    match c.fetch_add(1, Ordering::SeqCst) {
+                        // Batch 1: valid JSON + priced usageMetadata ($0.0225).
+                        0 => (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            r#"{"candidates":[{"content":{"parts":[{"text":"{\"title\":\"Batch 1\",\"stoppedAt\":\"Done\",\"leftOpen\":\"\",\"suggestedLine\":\"planar\",\"isOneOff\":false}"}]}}],"usageMetadata":{"promptTokenCount":10000,"candidatesTokenCount":1000}}"#,
+                        )
+                            .into_response(),
+                        // Batch 2: HTTP 200 with truncated / malformed JSON body (post-dispatch failure).
+                        _ => (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            r#"{"candidates":[{"content":{"parts":[{"text":"{\"title\":\"Trun"#,
+                        )
+                            .into_response(),
+                    }
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_api).await;
+        });
+
+        let dir = TempDir::new().unwrap();
+        let roots = crate::env::HarnessRoots {
+            claude_projects: dir.path().join("claude"),
+            codex_sessions: dir.path().join("codex").join("sessions"),
+            codex_archived: dir.path().join("codex").join("archived_sessions"),
+            antigravity_brain: dir.path().join("antigravity"),
+            dsh_sessions: dir.path().join("dsh").join("sessions"),
+        };
+        let sess_dir = roots.codex_sessions.join("2026").join("11").join("25");
+        fs::create_dir_all(&sess_dir).unwrap();
+        let now = Local::now();
+        let t1 = (now - chrono::Duration::minutes(15)).to_rfc3339();
+        let t2 = (now - chrono::Duration::minutes(12)).to_rfc3339();
+        let t3 = (now - chrono::Duration::minutes(9)).to_rfc3339();
+        for idx in 1..=2 {
+            fs::write(
+                sess_dir.join(format!("rollout-m{idx}.jsonl")),
+                format!(
+                    concat!(
+                        "{{\"timestamp\":\"{t1}\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"m{idx}\",\"cwd\":\"/tmp/ws\",\"source\":\"vscode\"}}}}\n",
+                        "{{\"timestamp\":\"{t1}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 1 m{idx}\"}}]}}}}\n",
+                        "{{\"timestamp\":\"{t2}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 2 m{idx}\"}}]}}}}\n",
+                        "{{\"timestamp\":\"{t3}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 3 m{idx}\"}}]}}}}\n"
+                    ),
+                    t1 = t1,
+                    t2 = t2,
+                    t3 = t3,
+                    idx = idx,
+                ),
+            )
+            .unwrap();
+        }
+
+        let db_path = dir.path().join("planar.db");
+        {
+            let mut store = crate::db::Store::open(&db_path).unwrap();
+            crate::ingest::scan_all_harnesses(&mut store, &roots).unwrap();
+            let settings = AppSettings {
+                processor_configured: true,
+                processor_mode: "api".to_string(),
+                api_provider: "gemini".to_string(),
+                api_base_url: format!("http://{addr}"),
+                api_model: "gemini-4-hydrogen".to_string(),
+                api_key: "test-key".to_string(),
+                sync_batch_limit: 1,
+                ..AppSettings::default()
+            };
+            store.save_settings(&settings).unwrap();
+        }
+
+        let state = AppState::new(db_path.clone(), roots.clone());
+        let summary = TEST_BILLING_PROVIDER_OVERRIDE
+            .scope(Some("google"), async {
+                sync_pending_sessions_in_scope(&state, false, Some(2), None).await
+            })
+            .await
+            .unwrap();
+        server_task.abort();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(summary.processed, 1);
+        assert_eq!(summary.failed, 1);
+        let usage = summary.usage.expect("expected incomplete usage summary");
+        assert_eq!(usage.api_calls, 2);
+        assert_eq!(usage.priced_calls, 1);
+        assert!(
+            usage.incomplete,
+            "truncated/malformed JSON on batch 2 must mark run incomplete"
+        );
+        assert_eq!(usage.total_tokens, 11_000);
+        assert!((usage.cost_usd.unwrap() - 0.0225).abs() < 1e-6);
+
+        // Pre-dispatch configuration error (missing Base URL on openai-compatible) stays a hard
+        // failure with `usage == None` and never fabricates an API call count.
+        {
+            let store = crate::db::Store::open(&db_path).unwrap();
+            let bad_settings = AppSettings {
+                processor_configured: true,
+                processor_mode: "api".to_string(),
+                api_provider: "openai-compatible".to_string(),
+                api_base_url: String::new(),
+                api_model: "gpt-4o-mini".to_string(),
+                api_key: "test-key".to_string(),
+                sync_batch_limit: 1,
+                ..AppSettings::default()
+            };
+            store.save_settings(&bad_settings).unwrap();
+        }
+        let pre_dispatch_summary = sync_pending_sessions_in_scope(&state, false, Some(1), None)
+            .await
+            .unwrap();
+        assert_eq!(pre_dispatch_summary.processed, 0);
+        assert_eq!(pre_dispatch_summary.failed, 1);
+        assert_eq!(
+            pre_dispatch_summary.usage, None,
+            "pre-dispatch configuration error must not fabricate an API usage record"
+        );
+    }
+
+    #[tokio::test]
+    async fn named_provider_with_overridden_local_base_url_suppresses_vendor_usd_while_retaining_tokens()
+     {
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tempfile::TempDir;
+
+        // 1. Unit check on `resolve_billing_provider` and `estimate_prepared_batches_cost`:
+        assert_eq!(
+            resolve_billing_provider("openai", "https://api.openai.com/v1"),
+            Some("openai")
+        );
+        assert_eq!(
+            resolve_billing_provider("openai", "http://127.0.0.1:8080/v1"),
+            None
+        );
+        assert_eq!(
+            resolve_billing_provider("gemini", "https://my-local-proxy.example/v1beta"),
+            None
+        );
+        assert_eq!(
+            resolve_billing_provider("gemini", "https://generativelanguage.googleapis.com/v1beta"),
+            Some("google")
+        );
+
+        let sample = vec![vec![PreparedSession {
+            cand: SyncCandidate {
+                id: "codex:local-override".to_string(),
+                harness: "codex".to_string(),
+                source_path: "/tmp/local-override.jsonl".to_string(),
+                step_count: 4,
+                user_input_count: 3,
+                first_user_prompt: "Test local override".to_string(),
+                cwd: Some("/Users/demo/planar".to_string()),
+                line_id: None,
+            },
+            sliced: SlicedTrajectory {
+                total_steps: 2,
+                user_count: 1,
+                head: vec![SlicedStep {
+                    index: 1,
+                    role: "user",
+                    text: "Test local override".to_string(),
+                }],
+                middle_users: Vec::new(),
+                tail: Vec::new(),
+            },
+            approx_chars: 280,
+        }]];
+        let local_override_settings = AppSettings {
+            processor_configured: true,
+            processor_mode: "api".to_string(),
+            api_provider: "openai".to_string(),
+            api_base_url: "http://127.0.0.1:8080/v1".to_string(),
+            api_model: "gpt-4o-mini".to_string(),
+            ..AppSettings::default()
+        };
+        let est = estimate_prepared_batches_cost(&sample, &[], &local_override_settings);
+        assert!(est.estimated_input_tokens > 0);
+        assert_eq!(
+            est.estimated_cost_usd_range, None,
+            "named provider with overridden local Base URL must suppress vendor USD estimate"
+        );
+
+        // 2. Live Sync call to overridden localhost URL using named provider `"openai"` + `"gpt-4o-mini"`:
+        // reported tokens MUST be preserved while `cost_usd` stays `None` and `incomplete` is `true`.
+        let mock_api = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                Json(serde_json::json!({
+                    "choices": [{
+                        "message": {
+                            "content": "{\"title\":\"Local Proxy\",\"stoppedAt\":\"Done\",\"leftOpen\":\"\",\"suggestedLine\":\"planar\",\"isOneOff\":false}"
+                        }
+                    }],
+                    "usage": {
+                        "prompt_tokens": 4_000,
+                        "completion_tokens": 500
+                    }
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_api).await;
+        });
+
+        let dir = TempDir::new().unwrap();
+        let roots = crate::env::HarnessRoots {
+            claude_projects: dir.path().join("claude"),
+            codex_sessions: dir.path().join("codex").join("sessions"),
+            codex_archived: dir.path().join("codex").join("archived_sessions"),
+            antigravity_brain: dir.path().join("antigravity"),
+            dsh_sessions: dir.path().join("dsh").join("sessions"),
+        };
+        let sess_dir = roots.codex_sessions.join("2026").join("11").join("25");
+        fs::create_dir_all(&sess_dir).unwrap();
+        let now = Local::now();
+        let t1 = (now - chrono::Duration::minutes(10)).to_rfc3339();
+        let t2 = (now - chrono::Duration::minutes(8)).to_rfc3339();
+        let t3 = (now - chrono::Duration::minutes(5)).to_rfc3339();
+        fs::write(
+            sess_dir.join("rollout-local.jsonl"),
+            format!(
+                concat!(
+                    "{{\"timestamp\":\"{t1}\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"local-1\",\"cwd\":\"/tmp/ws\",\"source\":\"vscode\"}}}}\n",
+                    "{{\"timestamp\":\"{t1}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 1\"}}]}}}}\n",
+                    "{{\"timestamp\":\"{t2}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 2\"}}]}}}}\n",
+                    "{{\"timestamp\":\"{t3}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 3\"}}]}}}}\n"
+                ),
+                t1 = t1,
+                t2 = t2,
+                t3 = t3,
+            ),
+        )
+        .unwrap();
+
+        let db_path = dir.path().join("planar.db");
+        {
+            let mut store = crate::db::Store::open(&db_path).unwrap();
+            crate::ingest::scan_all_harnesses(&mut store, &roots).unwrap();
+            let settings = AppSettings {
+                processor_configured: true,
+                processor_mode: "api".to_string(),
+                api_provider: "openai".to_string(),
+                api_base_url: format!("http://{addr}"),
+                api_model: "gpt-4o-mini".to_string(),
+                api_key: "test-key".to_string(),
+                sync_batch_limit: 4,
+                ..AppSettings::default()
+            };
+            store.save_settings(&settings).unwrap();
+        }
+
+        let state = AppState::new(db_path, roots);
+        let summary = sync_pending_sessions_in_scope(&state, false, None, None)
+            .await
+            .unwrap();
+        server_task.abort();
+
+        assert_eq!(summary.processed, 1);
+        let usage = summary.usage.expect("expected token usage to be retained");
+        assert_eq!(usage.input_tokens, 4_000);
+        assert_eq!(usage.output_tokens, 500);
+        assert_eq!(usage.total_tokens, 4_500);
+        assert_eq!(
+            usage.cost_usd, None,
+            "overridden local endpoint must not inherit OpenAI USD pricing"
+        );
+        assert_eq!(usage.api_calls, 1);
+        assert_eq!(usage.priced_calls, 0);
+        assert!(usage.incomplete);
     }
 }

@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, Duration, FixedOffset, Local, NaiveDate};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 use crate::burst::{
     IDLE_GAP_CAP_MS, RawSpan, format_tz_label, fractional_hour, local_midnight_ms,
@@ -145,6 +145,36 @@ impl Store {
         let mut store = Self { conn };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// Opens an existing SQLite database strictly read-only without creating parent directories,
+    /// creating a missing file, switching journal modes, or running schema migrations.
+    ///
+    /// Returns `Ok(None)` if `path` does not exist or has not yet been initialized with Planar's
+    /// core tables.
+    pub fn open_readonly(path: &Path) -> Result<Option<Self>> {
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)?;
+        conn.execute_batch(
+            "
+            PRAGMA busy_timeout = 5000;
+            PRAGMA query_only = ON;
+            ",
+        )?;
+        let required_tables: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN ('app_settings', 'lines', 'sessions', 'session_digests')",
+            [],
+            |row| row.get(0),
+        )?;
+        if required_tables < 4 {
+            return Ok(None);
+        }
+        Ok(Some(Self { conn }))
     }
 
     /// Borrows the underlying SQLite connection (used for diagnostics and tests).

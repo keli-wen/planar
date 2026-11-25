@@ -250,8 +250,132 @@ pub struct HarnessStatusDto {
     pub session_count: usize,
 }
 
+/// Actual token usage and computed API spend accumulated during a `Sync` or `Regroup` run.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SyncUsageDto {
+    /// Uncached input tokens sent to the model.
+    pub input_tokens: u64,
+    /// Cached input tokens read from prompt cache.
+    pub cache_read_tokens: u64,
+    /// Prompt-cache creation / write tokens (e.g. Anthropic).
+    pub cache_write_tokens: u64,
+    /// Visible completion / candidate output tokens (excluding `thinking_tokens`).
+    pub output_tokens: u64,
+    /// Reasoning / thought tokens (separate from `output_tokens`, billed as output).
+    pub thinking_tokens: u64,
+    /// Sum of all token buckets above.
+    pub total_tokens: u64,
+    /// Computed API USD spend via `genai-prices`, or `None` for local CLI / unpriced models.
+    /// When `incomplete` is `true`, this figure is a partial subtotal covering only `priced_calls`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Active model identifier used for the run, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// `true` when executed via a local CLI subscription (`agy`/`codex`/`dsh`/`claude`) with no
+    /// direct per-token API spend.
+    pub is_local_cli: bool,
+    /// Total number of direct API calls observed in this run or batch.
+    pub api_calls: usize,
+    /// Number of direct API calls whose usage metadata was present and priced into `cost_usd`.
+    pub priced_calls: usize,
+    /// `true` when at least one direct API call omitted usage metadata or lacked known billing
+    /// pricing, making `total_tokens` and/or `cost_usd` an incomplete subtotal.
+    pub incomplete: bool,
+}
+
+impl SyncUsageDto {
+    /// Creates an honest local-CLI usage record (no fabricated per-token API spend).
+    #[must_use]
+    pub fn local_cli(model: Option<String>) -> Self {
+        Self {
+            model: model.filter(|m| !m.trim().is_empty()),
+            is_local_cli: true,
+            ..Self::default()
+        }
+    }
+
+    /// Creates a record for a direct API call whose response omitted usage metadata.
+    #[must_use]
+    pub fn missing_api_usage(model: Option<String>) -> Self {
+        Self {
+            model: model.filter(|m| !m.trim().is_empty()),
+            is_local_cli: false,
+            api_calls: 1,
+            priced_calls: 0,
+            incomplete: true,
+            ..Self::default()
+        }
+    }
+
+    /// Merges another call or batch usage snapshot into `self`, preserving honest partial-coverage
+    /// flags whenever any call lacked usage metadata or model pricing.
+    pub fn merge_from(&mut self, other: &Self) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(other.cache_read_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(other.cache_write_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.thinking_tokens = self.thinking_tokens.saturating_add(other.thinking_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
+        self.cost_usd = match (self.cost_usd, other.cost_usd) {
+            (Some(a), Some(b)) => Some(a + b),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        if self.model.is_none() && other.model.is_some() {
+            self.model.clone_from(&other.model);
+        }
+        self.api_calls = self.api_calls.saturating_add(other.api_calls);
+        self.priced_calls = self.priced_calls.saturating_add(other.priced_calls);
+        self.incomplete = self.incomplete
+            || other.incomplete
+            || (self.api_calls > 0 && self.priced_calls < self.api_calls);
+        if other.is_local_cli
+            && self.api_calls == 0
+            && self.total_tokens == 0
+            && self.cost_usd.is_none()
+        {
+            self.is_local_cli = true;
+        } else if !other.is_local_cli {
+            self.is_local_cli = false;
+        }
+    }
+}
+
+/// Low/high USD cost range for a pre-flight `Sync` estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CostUsdRangeDto {
+    pub low: f64,
+    pub high: f64,
+}
+
+/// Read-only pre-flight cost and token estimate returned by `GET /api/sync/estimate`
+/// and `planar sync --estimate`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncEstimateDto {
+    pub session_count: usize,
+    pub batch_count: usize,
+    pub estimated_input_tokens: u64,
+    pub estimated_output_tokens: u64,
+    #[serde(default)]
+    pub estimated_thinking_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_usd_range: Option<CostUsdRangeDto>,
+    pub model: String,
+    pub backend: String,
+    pub is_local_cli: bool,
+}
+
 /// Outcome summary attached to `/api/sync` and `/api/regroup` responses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncSummaryDto {
     pub processed: usize,
@@ -259,6 +383,8 @@ pub struct SyncSummaryDto {
     pub skipped: usize,
     pub backend_used: String,
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<SyncUsageDto>,
 }
 
 /// Preview metadata for one session inside an active `Sync` batch.
@@ -295,6 +421,10 @@ pub struct SyncBatchDoneDto {
     pub completed: usize,
     pub total: usize,
     pub backend_used: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_usage: Option<SyncUsageDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cumulative_usage: Option<SyncUsageDto>,
     pub plane: PlaneResponse,
 }
 
