@@ -10,7 +10,7 @@ const simplifier = agent('agy/gemini-4-neon', {
   role: 'simplifier',
 });
 
-export default async ({ task }) => {
+export default async ({ task, trace }) => {
   let work = await coder(`${devPrompt}\n\n## Task\n${task}`, { stage: 'dev' });
 
   work = await refine(work, {
@@ -19,11 +19,10 @@ export default async ({ task }) => {
     maxRounds: 2,
     stage: 'review',
   });
-  if (work.verdict === 'blocked') return work;
+  if (work.blocked) return work;
 
-  const reviewNote = work.passed
-    ? ''
-    : `\n\nNote: Review reached maxRounds with a non-blocking residual note — mention it transparently in the PR body:\n${work.summary}`;
+  const notes = [];
+  if (!work.passed) notes.push(`Review residual note: ${work.feedback || work.summary}`);
 
   work = await refine(work, {
     by: simplifier,
@@ -31,6 +30,13 @@ export default async ({ task }) => {
     maxRounds: 1,
     stage: 'simplify',
   });
+  if (work.blocked) return work;
+  if (!work.passed) notes.push(`Simplification note: ${work.feedback || work.summary}`);
 
-  return await work.continue(`${prPrompt}${reviewNote}`, { stage: 'pr' });
+  const residualSection = notes.length
+    ? `\n\n## Residual Non-Blocking Notes (mention transparently in the PR body)\n- ${notes.join('\n- ')}`
+    : '';
+  const traceSection = `\n\n## Agent Workflow Trace (include verbatim at the end of the PR body)\n${trace.toMarkdown()}`;
+
+  return await work.continue(`${prPrompt}${residualSection}${traceSection}`, { stage: 'pr' });
 };
