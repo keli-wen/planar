@@ -386,6 +386,14 @@ mod tests {
         }
         assert!(api_provider("ollama").unwrap().allow_keyless);
         assert!(api_provider("openai-compatible").unwrap().requires_base_url);
+        assert_eq!(
+            api_provider("gemini").unwrap().default_model,
+            "gemini-4-hydrogen"
+        );
+        assert_eq!(
+            api_provider("openrouter").unwrap().default_model,
+            "google/gemini-4-hydrogen"
+        );
     }
 
     #[test]

@@ -2878,6 +2878,11 @@ select {
   color: var(--ink-muted);
 }
 
+.settings-row-copy {
+  min-width: 0;
+  flex: 1 1 180px;
+}
+
 .settings-row-title {
   display: inline-flex;
   align-items: center;

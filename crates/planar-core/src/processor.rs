@@ -1500,23 +1500,94 @@ fn resolve_api_key(provider: &str, settings: &AppSettings) -> Result<String> {
     )))
 }
 
-async fn call_gemini_api(
-    client: &reqwest::Client,
-    base: &str,
-    model: &str,
-    api_key: &str,
-    prompt: &str,
-) -> Result<String> {
-    let url = format!("{base}/models/{model}:generateContent?key={api_key}");
-    let body = json!({
-        "contents": [{ "role": "user", "parts": [{ "text": prompt }] }],
-        "generationConfig": {
-            "temperature": 0.2,
-            "responseMimeType": "application/json"
-        }
-    });
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GeminiGenerationProfile {
+    thinking_level: Option<&'static str>,
+    include_temperature: bool,
+}
 
-    let val = send_json_post(client.post(&url).json(&body), "Gemini").await?;
+fn strip_gemini_models_prefix(model: &str) -> &str {
+    let trimmed = model.trim();
+    if trimmed
+        .as_bytes()
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"models/"))
+    {
+        &trimmed[7..]
+    } else {
+        trimmed
+    }
+}
+
+fn gemini_generation_profile(model: &str) -> GeminiGenerationProfile {
+    let m = strip_gemini_models_prefix(model).to_ascii_lowercase();
+
+    if m.starts_with("gemini-4-") || m.starts_with("gemini-4.") {
+        return GeminiGenerationProfile {
+            thinking_level: Some("low"),
+            include_temperature: false,
+        };
+    }
+
+    if m.starts_with("gemini-3.6-flash") {
+        return GeminiGenerationProfile {
+            thinking_level: Some("minimal"),
+            include_temperature: false,
+        };
+    }
+
+    if m.starts_with("gemini-3.5-flash-lite")
+        || m.starts_with("gemini-3.1-flash-lite")
+        || m == "gemini-3-flash"
+        || m.starts_with("gemini-3-flash-")
+    {
+        return GeminiGenerationProfile {
+            thinking_level: Some("minimal"),
+            include_temperature: true,
+        };
+    }
+
+    if m.starts_with("gemini-3.8-flash") {
+        return GeminiGenerationProfile {
+            thinking_level: Some("low"),
+            include_temperature: false,
+        };
+    }
+
+    if m.starts_with("gemini-3.1-pro") || m.starts_with("gemini-3-pro") {
+        return GeminiGenerationProfile {
+            thinking_level: Some("low"),
+            include_temperature: true,
+        };
+    }
+
+    GeminiGenerationProfile {
+        thinking_level: None,
+        include_temperature: true,
+    }
+}
+
+fn build_gemini_request_body(model: &str, prompt: &str) -> Value {
+    let profile = gemini_generation_profile(model);
+    let mut generation_config = serde_json::Map::new();
+    if profile.include_temperature {
+        generation_config.insert("temperature".to_string(), json!(0.2));
+    }
+    generation_config.insert("responseMimeType".to_string(), json!("application/json"));
+    if let Some(level) = profile.thinking_level {
+        generation_config.insert(
+            "thinkingConfig".to_string(),
+            json!({ "thinkingLevel": level }),
+        );
+    }
+
+    json!({
+        "contents": [{ "role": "user", "parts": [{ "text": prompt }] }],
+        "generationConfig": Value::Object(generation_config),
+    })
+}
+
+fn extract_gemini_reply_text(val: &Value) -> Result<String> {
     let mut text = String::new();
     if let Some(parts) = val
         .get("candidates")
@@ -1527,6 +1598,9 @@ async fn call_gemini_api(
         .and_then(Value::as_array)
     {
         for p in parts {
+            if p.get("thought").and_then(Value::as_bool).unwrap_or(false) {
+                continue;
+            }
             if let Some(t) = p.get("text").and_then(Value::as_str) {
                 text.push_str(t);
             }
@@ -1538,6 +1612,21 @@ async fn call_gemini_api(
         ));
     }
     Ok(text)
+}
+
+async fn call_gemini_api(
+    client: &reqwest::Client,
+    base: &str,
+    model: &str,
+    api_key: &str,
+    prompt: &str,
+) -> Result<String> {
+    let model_path = strip_gemini_models_prefix(model);
+    let url = format!("{base}/models/{model_path}:generateContent?key={api_key}");
+    let body = build_gemini_request_body(model_path, prompt);
+
+    let val = send_json_post(client.post(&url).json(&body), "Gemini").await?;
+    extract_gemini_reply_text(&val)
 }
 
 async fn call_anthropic_api(
@@ -2422,5 +2511,124 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed["codex:s1"].suggested_line, "planar");
         assert_eq!(parsed["codex:s2"].title, "Stream UI Widget");
+    }
+
+    #[test]
+    fn gemini_request_body_dispatches_thinking_level_and_temperature_by_model() {
+        for model in [
+            "gemini-4-hydrogen",
+            "gemini-4-neon",
+            "Models/Gemini-4-Hydrogen",
+        ] {
+            let body = build_gemini_request_body(model, "summarize");
+            let cfg = &body["generationConfig"];
+            assert_eq!(cfg["responseMimeType"], "application/json", "{model}");
+            assert_eq!(cfg["thinkingConfig"]["thinkingLevel"], "low", "{model}");
+            assert!(
+                cfg.get("temperature").is_none(),
+                "Gemini 4 model `{model}` must omit temperature"
+            );
+        }
+
+        for model in [
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite",
+            "gemini-3-flash-preview",
+        ] {
+            let body = build_gemini_request_body(model, "summarize");
+            let cfg = &body["generationConfig"];
+            assert_eq!(cfg["responseMimeType"], "application/json", "{model}");
+            assert_eq!(cfg["thinkingConfig"]["thinkingLevel"], "minimal", "{model}");
+            assert_eq!(cfg["temperature"], 0.2, "{model}");
+        }
+
+        let g36 = build_gemini_request_body("gemini-3.6-flash", "summarize");
+        assert_eq!(
+            g36["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert_eq!(
+            g36["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "minimal"
+        );
+        assert!(g36["generationConfig"].get("temperature").is_none());
+
+        let g38 = build_gemini_request_body("gemini-3.8-flash", "summarize");
+        assert_eq!(
+            g38["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert_eq!(
+            g38["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "low"
+        );
+        assert!(g38["generationConfig"].get("temperature").is_none());
+
+        for model in ["gemini-3.1-pro-preview", "gemini-3-pro-preview"] {
+            let body = build_gemini_request_body(model, "summarize");
+            let cfg = &body["generationConfig"];
+            assert_eq!(cfg["responseMimeType"], "application/json", "{model}");
+            assert_eq!(cfg["thinkingConfig"]["thinkingLevel"], "low", "{model}");
+            assert_eq!(cfg["temperature"], 0.2, "{model}");
+        }
+
+        for model in [
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "自定义模型-test",
+        ] {
+            let body = build_gemini_request_body(model, "summarize");
+            let cfg = &body["generationConfig"];
+            assert_eq!(cfg["responseMimeType"], "application/json", "{model}");
+            assert!(
+                cfg.get("thinkingConfig").is_none(),
+                "legacy model `{model}` must omit thinkingConfig"
+            );
+            assert_eq!(cfg["temperature"], 0.2, "{model}");
+        }
+    }
+
+    #[test]
+    fn gemini_reply_extraction_ignores_thought_parts_and_endpoint_preserves_override() {
+        let payload = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        { "thought": true, "text": "internal chain of thought" },
+                        { "text": "{\"ok\":true}" }
+                    ]
+                }
+            }]
+        });
+        assert_eq!(
+            extract_gemini_reply_text(&payload).unwrap(),
+            "{\"ok\":true}"
+        );
+
+        let blank_settings = AppSettings {
+            api_provider: "gemini".to_string(),
+            api_model: String::new(),
+            ..AppSettings::default()
+        };
+        let (_, default_model) = resolve_api_endpoint("gemini", &blank_settings).unwrap();
+        assert_eq!(default_model, "gemini-4-hydrogen");
+
+        let override_settings = AppSettings {
+            api_provider: "gemini".to_string(),
+            api_model: "gemini-2.5-flash-lite".to_string(),
+            ..AppSettings::default()
+        };
+        let (_, saved_model) = resolve_api_endpoint("gemini", &override_settings).unwrap();
+        assert_eq!(saved_model, "gemini-2.5-flash-lite");
+
+        let openrouter_settings = AppSettings {
+            api_provider: "openrouter".to_string(),
+            api_model: String::new(),
+            ..AppSettings::default()
+        };
+        let (_, openrouter_model) =
+            resolve_api_endpoint("openrouter", &openrouter_settings).unwrap();
+        assert_eq!(openrouter_model, "google/gemini-4-hydrogen");
     }
 }

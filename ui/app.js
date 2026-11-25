@@ -224,6 +224,7 @@ const I18N = {
     descApiUrl: "本地或兼容网关必填；官方端点留空即可。",
     lblApiModel: "模型名称",
     descApiModel: `如 ${API_MODEL_EXAMPLES.join("、")}。`,
+    descApiModelGemini: "默认 {defaultModel}；追求极速与最低成本可选 {fastModel}。",
     lblApiKey: "API Key",
     descApiKey: "留空时自动尝试读取对应环境变量（如 DEEPSEEK_API_KEY）。",
     lblBatchLimit: "单批归纳会话上限",
@@ -459,6 +460,7 @@ const I18N = {
     descApiUrl: "Required for local/compatible gateways; leave empty for official endpoints.",
     lblApiModel: "Model ID",
     descApiModel: `e.g. ${API_MODEL_EXAMPLES.join(", ")}.`,
+    descApiModelGemini: "Defaults to {defaultModel}; use {fastModel} for ultra-fast, lowest-cost runs.",
     lblApiKey: "API key",
     descApiKey: "Leave empty to read standard environment variables (e.g. DEEPSEEK_API_KEY).",
     lblBatchLimit: "Max sessions per Sync batch",
@@ -3709,6 +3711,14 @@ function renderSettingsView(motionCls = "") {
     const curCli = (s.cliHarness || "").trim();
     const curApi = (s.apiProvider || DEFAULT_SETTINGS.apiProvider).trim() || DEFAULT_SETTINGS.apiProvider;
     const provMeta = getApiProviderMeta(curApi);
+    const apiModelHint =
+      curApi === "gemini" || curApi === "openrouter"
+        ? t("descApiModelGemini", {
+            defaultModel: provMeta.defaultModel,
+            fastModel:
+              curApi === "openrouter" ? "google/gemini-3.5-flash-lite" : "gemini-3.5-flash-lite",
+          })
+        : "";
     const selectedCliMeta = curCli && curCli !== "auto" ? statusById.get(curCli) : null;
     const showMissingCliBanner = Boolean(isCli && selectedCliMeta && !selectedCliMeta.cliAvailable && !s.cliBinOverride);
     const isCliSelectOpen = state.popover?.type === "cli-select";
@@ -3854,7 +3864,10 @@ function renderSettingsView(motionCls = "") {
                   )}" placeholder="${escapeHtml(provMeta.defaultBase)}" autocomplete="off" />
                 </div>
                 <div class="settings-row">
-                  <div class="settings-row-title">${escapeHtml(t("lblApiModel"))}</div>
+                  <div class="settings-row-copy">
+                    <div class="settings-row-title">${escapeHtml(t("lblApiModel"))}</div>
+                    ${apiModelHint ? `<div class="settings-row-sub">${escapeHtml(apiModelHint)}</div>` : ""}
+                  </div>
                   <input class="settings-input is-wide is-mono" data-action="setting-text" data-field="apiModel" value="${escapeHtml(
                     s.apiModel || ""
                   )}" placeholder="${escapeHtml(provMeta.defaultModel)}" autocomplete="off" />
@@ -6982,4 +6995,4 @@ if (!shouldForceMock(initialUrlParams)) {
   }, 15000);
 }
 
-export { applyPlaneResponse, DEFAULT_SETTINGS, isProcessorConfigured, state };
+export { applyPlaneResponse, DEFAULT_SETTINGS, isProcessorConfigured, renderSettingsView, state };
