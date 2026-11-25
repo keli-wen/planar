@@ -395,7 +395,10 @@ async fn cmd_sync(
         None => None,
     };
     let scope = SyncScope {
-        days: days.clamp(1, 31),
+        days: days.clamp(
+            planar_core::defaults::WINDOW_DAYS_MIN,
+            planar_core::defaults::WINDOW_DAYS_MAX,
+        ),
         anchor_date,
         harness,
     };

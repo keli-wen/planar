@@ -12,11 +12,10 @@ use std::time::{Instant, UNIX_EPOCH};
 use chrono::DateTime;
 
 use crate::db::{FileCursor, IngestMode, Store};
+use crate::defaults::MAX_PROMPT_CHARS;
 use crate::env::HarnessRoots;
 use crate::error::Result;
 use crate::model::ScanStats;
-
-const MAX_PROMPT_CHARS: usize = 240;
 
 /// Decision for how to scan a source trajectory file given its previous cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

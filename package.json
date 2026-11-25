@@ -16,14 +16,15 @@
     "app:install": "npm run app:build && rm -rf /Applications/Planar.app && cp -R target/release/bundle/macos/Planar.app /Applications/Planar.app && codesign --force --deep -s - /Applications/Planar.app",
     "app:open": "open -a /Applications/Planar.app",
     "hooks:install": "git config core.hooksPath .githooks",
-    "check:syntax": "node --check ui/app.js && node --check scripts/preview.mjs && node --check scripts/check-hygiene.mjs",
+    "check:syntax": "node --check ui/app.js && node --check scripts/preview.mjs && node --check scripts/check-hygiene.mjs && node --check scripts/test-ui-defaults.mjs",
     "check:hygiene": "node ./scripts/check-hygiene.mjs",
     "lint:ui": "biome lint ui scripts && npm run check:syntax",
     "lint:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings",
     "lint": "npm run lint:ui && npm run lint:rust",
     "test": "cargo test --workspace",
+    "test:ui": "node --test scripts/test-ui-defaults.mjs",
     "test:hooks": "python3 -m unittest discover -s scripts/hooks -p 'test_*.py' -v",
-    "verify": "npm run lint && npm run check:hygiene && npm run test && npm run test:hooks",
+    "verify": "npm run lint && npm run check:hygiene && npm run test && npm run test:ui && npm run test:hooks",
     "pre-pr": "npm run verify && python3 ./scripts/hooks/pre_tool_use_pr_guard.py --write-marker"
   },
   "engines": {

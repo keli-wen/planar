@@ -10,25 +10,26 @@ use crate::burst::{
     IDLE_GAP_CAP_MS, RawSpan, format_tz_label, fractional_hour, local_midnight_ms,
     merge_activity_spans, project_bursts_into_days, sum_interval_minutes_in_range,
 };
+use crate::defaults::{
+    FEWEST_USER_INPUTS_MIN, LINE_PRIORITY_MAX, LINE_PRIORITY_MIN, MAX_SHORT_ITEMS_RETURNED,
+    ONE_OFF_LINE_COLOR_INDEX, QUERY_LIMIT_MAX, QUERY_LIMIT_MIN, SEARCH_DAYS_MAX,
+    SESSIONS_SHOWN_PER_LINE_MIN, SLICER_STEPS_MIN, STATUS_WINDOW_DAYS_MAX, SYNC_BATCH_LIMIT_MAX,
+    SYNC_BATCH_LIMIT_MIN, WINDOW_DAYS_MAX, WINDOW_DAYS_MIN, harness_order, palette_color,
+};
+pub use crate::defaults::{MAX_L1_BATCH_LINES, MAX_L2_BATCH_SESSIONS};
 use crate::env::{HarnessRoots, cli_binary_name_for_harness, resolve_cli_binary};
 use crate::error::{PlanarError, Result};
 use crate::model::{
     AmbiguousSessionHint, AppSettings, BatchLinesResponse, BatchSessionsResponse,
     ContributionDayDto, DayMeta, HarnessCount, HarnessStatusDto, INTERNAL_DIGEST_SENTINEL,
     LineDetailDto, LineDto, LineHint, LineIdUpdate, LineSessionDigestDto, LiveSessionSummary,
-    ONE_OFF_LINE_ID, PALETTE, PlaneResponse, SearchHitDto, SearchQuery, SearchResponse,
-    SessionDepLink, SessionDigestSummaryDto, SessionDto, SessionFocus, SessionSliceDto,
-    ShortItemDto, ShortSessionsDto, SlicedTurnDto, StatusDependency, StatusLineSummary,
-    StatusSessionPreview, StatusSnapshot, UnsummarizedDto,
+    ONE_OFF_LINE_ID, PlaneResponse, SearchHitDto, SearchQuery, SearchResponse, SessionDepLink,
+    SessionDigestSummaryDto, SessionDto, SessionFocus, SessionSliceDto, ShortItemDto,
+    ShortSessionsDto, SlicedTurnDto, StatusDependency, StatusLineSummary, StatusSessionPreview,
+    StatusSnapshot, UnsummarizedDto,
 };
 use crate::pricing::estimate_cost_usd;
 
-/// Maximum number of Lines accepted in a single L1 `query_lines` batch.
-pub const MAX_L1_BATCH_LINES: usize = 8;
-/// Maximum number of Sessions accepted in a single L2 `query_sessions` batch.
-pub const MAX_L2_BATCH_SESSIONS: usize = 3;
-
-const MAX_SHORT_ITEMS_RETURNED: usize = 20;
 const SETTINGS_ROW_KEY: &str = "app_settings";
 
 struct ExistingSessionState {
@@ -240,7 +241,7 @@ impl Store {
         self.conn.execute(
             "INSERT OR IGNORE INTO lines (id, name, color, pinned, is_system_bucket, priority, status, sort_order)
              VALUES (?1, ?2, ?3, 1, 1, 0, 'active', 9999)",
-            params![ONE_OFF_LINE_ID, "One-off", PALETTE[4]],
+            params![ONE_OFF_LINE_ID, "One-off", palette_color(ONE_OFF_LINE_COLOR_INDEX)],
         )?;
 
         self.migrate_line_description()?;
@@ -393,6 +394,9 @@ impl Store {
     }
 
     fn migrate_batch_default_4(&mut self) -> Result<()> {
+        const LEGACY_SYNC_BATCH_LIMIT: u64 = 8;
+        const MIGRATED_SYNC_BATCH_LIMIT: usize = 4;
+
         let done: Option<String> = self
             .conn
             .query_row(
@@ -405,10 +409,24 @@ impl Store {
             return Ok(());
         }
 
-        if let Ok(mut settings) = self.get_settings()
-            && settings.sync_batch_limit == 8
+        let persisted_raw: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = ?1",
+                params![SETTINGS_ROW_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(raw_json) = persisted_raw
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw_json)
+            && val
+                .get("syncBatchLimit")
+                .and_then(serde_json::Value::as_u64)
+                == Some(LEGACY_SYNC_BATCH_LIMIT)
+            && let Ok(mut settings) = serde_json::from_str::<AppSettings>(&raw_json)
         {
-            settings.sync_batch_limit = 4;
+            settings.sync_batch_limit = MIGRATED_SYNC_BATCH_LIMIT;
             let _ = self.save_settings(&settings);
         }
         self.conn.execute(
@@ -829,23 +847,28 @@ impl Store {
 
     /// Persists `AppSettings` into `app_settings`.
     pub fn save_settings(&self, settings: &AppSettings) -> Result<()> {
+        let defaults = AppSettings::default();
         let mut sanitized = settings.clone();
-        sanitized.fewest_user_inputs = sanitized.fewest_user_inputs.max(1);
-        sanitized.opening_steps = sanitized.opening_steps.max(5);
-        sanitized.closing_steps = sanitized.closing_steps.max(5);
-        sanitized.sessions_shown_per_line = sanitized.sessions_shown_per_line.max(1);
-        sanitized.sync_batch_limit = sanitized.sync_batch_limit.clamp(1, 50);
+        sanitized.fewest_user_inputs = sanitized.fewest_user_inputs.max(FEWEST_USER_INPUTS_MIN);
+        sanitized.opening_steps = sanitized.opening_steps.max(SLICER_STEPS_MIN);
+        sanitized.closing_steps = sanitized.closing_steps.max(SLICER_STEPS_MIN);
+        sanitized.sessions_shown_per_line = sanitized
+            .sessions_shown_per_line
+            .max(SESSIONS_SHOWN_PER_LINE_MIN);
+        sanitized.sync_batch_limit = sanitized
+            .sync_batch_limit
+            .clamp(SYNC_BATCH_LIMIT_MIN, SYNC_BATCH_LIMIT_MAX);
         if !matches!(sanitized.language.as_str(), "zh" | "en") {
-            sanitized.language = "zh".to_string();
+            sanitized.language = defaults.language;
         }
         if !matches!(sanitized.theme.as_str(), "system" | "light" | "dark") {
-            sanitized.theme = "system".to_string();
+            sanitized.theme = defaults.theme;
         }
         if !matches!(sanitized.metric_lens.as_str(), "time" | "tokens" | "cost") {
-            sanitized.metric_lens = "time".to_string();
+            sanitized.metric_lens = defaults.metric_lens;
         }
         if !matches!(sanitized.processor_mode.as_str(), "cli" | "api") {
-            sanitized.processor_mode = "cli".to_string();
+            sanitized.processor_mode = defaults.processor_mode;
         }
 
         let json = serde_json::to_string(&sanitized)?;
@@ -1230,7 +1253,7 @@ impl Store {
         now: DateTime<Local>,
     ) -> Result<PlaneResponse> {
         let settings = self.get_settings()?;
-        let effective_days = window_days.clamp(1, 31);
+        let effective_days = window_days.clamp(WINDOW_DAYS_MIN, WINDOW_DAYS_MAX);
         let local_fixed: DateTime<FixedOffset> = now.with_timezone(now.offset());
         let offset = *local_fixed.offset();
         let today = local_fixed.date_naive();
@@ -1577,8 +1600,10 @@ impl Store {
         );
         let effective_roots = fallback_roots.map(|r| r.effective_for(settings));
 
-        let mut out = Vec::with_capacity(4);
-        for hid in ["antigravity", "claude", "codex", "dsh"] {
+        let order = harness_order();
+        let mut out = Vec::with_capacity(order.len());
+        for hid in order {
+            let hid = hid.as_str();
             let bin_name = cli_binary_name_for_harness(hid).unwrap_or(hid);
             let custom_bin = if settings.cli_harness == hid {
                 settings.cli_bin_override.as_str()
@@ -1619,7 +1644,11 @@ impl Store {
             settings,
             current_slice_hash,
             force_all,
-            Some(settings.sync_batch_limit.clamp(1, 50)),
+            Some(
+                settings
+                    .sync_batch_limit
+                    .clamp(SYNC_BATCH_LIMIT_MIN, SYNC_BATCH_LIMIT_MAX),
+            ),
             None,
             Local::now(),
         )
@@ -1637,7 +1666,7 @@ impl Store {
         scope: Option<&SyncScope>,
         now: DateTime<Local>,
     ) -> Result<Vec<SyncCandidate>> {
-        let min_inputs = i64::from(settings.fewest_user_inputs.max(1));
+        let min_inputs = i64::from(settings.fewest_user_inputs.max(FEWEST_USER_INPUTS_MIN));
         let local_fixed: DateTime<FixedOffset> = now.with_timezone(now.offset());
         let offset = *local_fixed.offset();
         let today = local_fixed.date_naive();
@@ -1646,7 +1675,7 @@ impl Store {
 
         let (range_start_ms, historical_window_end_ms, harness_filter) = match scope {
             Some(sc) => {
-                let effective_days = sc.days.clamp(1, 31);
+                let effective_days = sc.days.clamp(WINDOW_DAYS_MIN, WINDOW_DAYS_MAX);
                 let end_date = sc.anchor_date.unwrap_or(today).min(today);
                 let timeline_start =
                     end_date - Duration::days(i64::try_from(effective_days - 1).unwrap_or(0));
@@ -1956,7 +1985,7 @@ impl Store {
         }
 
         let settings = self.get_settings()?;
-        let effective_days = window_days.clamp(1, 30);
+        let effective_days = window_days.clamp(WINDOW_DAYS_MIN, STATUS_WINDOW_DAYS_MAX);
         let normalized_cwd = cwd.and_then(normalize_workspace_path);
         let home_norm =
             dirs::home_dir().and_then(|p| normalize_workspace_path(&p.to_string_lossy()));
@@ -2236,7 +2265,7 @@ impl Store {
                 "`lines` must contain between 1 and {MAX_L1_BATCH_LINES} line identifiers"
             )));
         }
-        let capped_per_line = limit_per_line.clamp(1, 50);
+        let capped_per_line = limit_per_line.clamp(QUERY_LIMIT_MIN, QUERY_LIMIT_MAX);
 
         let settings = self.get_settings()?;
         let local_fixed: DateTime<FixedOffset> = now.with_timezone(now.offset());
@@ -2618,7 +2647,7 @@ impl Store {
         if raw_query.is_empty() {
             return Err(PlanarError::InvalidInput("`query` cannot be empty".into()));
         }
-        let limit = req.limit.clamp(1, 50);
+        let limit = req.limit.clamp(QUERY_LIMIT_MIN, QUERY_LIMIT_MAX);
 
         let settings = self.get_settings()?;
         let local_fixed: DateTime<FixedOffset> = now.with_timezone(now.offset());
@@ -2627,7 +2656,7 @@ impl Store {
         let now_ms = local_fixed.timestamp_millis();
         let range_end_ms = now_ms.saturating_add(60_000);
 
-        let effective_days = req.days.map(|d| d.clamp(1, 3650));
+        let effective_days = req.days.map(|d| d.clamp(WINDOW_DAYS_MIN, SEARCH_DAYS_MAX));
         let range_start_ms = effective_days.map_or(0_i64, |days| {
             let start_date = today - Duration::days(i64::try_from(days - 1).unwrap_or(0));
             local_midnight_ms(start_date, offset).unwrap_or(0)
@@ -2912,7 +2941,11 @@ impl Store {
                 color: row.get(3)?,
                 pinned: row.get::<_, i64>(4)? != 0,
                 is_system_bucket: row.get::<_, i64>(5)? != 0,
-                priority: u8::try_from(row.get::<_, i64>(6)?.clamp(0, 4)).unwrap_or(0),
+                priority: u8::try_from(
+                    row.get::<_, i64>(6)?
+                        .clamp(LINE_PRIORITY_MIN, LINE_PRIORITY_MAX),
+                )
+                .unwrap_or(0),
                 status: row.get(7)?,
             })
         })?;
@@ -3164,7 +3197,7 @@ fn insert_line_conn(conn: &Connection, name: &str, pinned: bool) -> Result<Strin
         |row| row.get(0),
     )?;
 
-    let color = PALETTE[usize::try_from(non_system_count.max(0)).unwrap_or(0) % PALETTE.len()];
+    let color = palette_color(usize::try_from(non_system_count.max(0)).unwrap_or(0));
 
     conn.execute(
         "INSERT INTO lines (id, name, color, pinned, is_system_bucket, priority, status, sort_order)
@@ -3756,6 +3789,132 @@ mod tests {
             )
             .unwrap();
         assert_eq!(one_off, "One-off");
+    }
+
+    #[test]
+    fn batch_default_4_migration_handles_fresh_and_legacy_databases() {
+        // 1. Fresh DB: migration marks completion without materializing an `app_settings` row.
+        let fresh_dir = TempDir::new().unwrap();
+        let fresh_path = fresh_dir.path().join("fresh.db");
+        let fresh_store = Store::open(&fresh_path).unwrap();
+        let persisted: Option<String> = fresh_store
+            .connection()
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = ?1",
+                params![SETTINGS_ROW_KEY],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(
+            persisted.is_none(),
+            "fresh database should not persist an app_settings row during migration"
+        );
+        let fresh_flag: Option<String> = fresh_store
+            .connection()
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = 'schema_batch_default_4_v1'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(fresh_flag.as_deref(), Some("1"));
+        assert_eq!(fresh_store.get_settings().unwrap(), AppSettings::default());
+        drop(fresh_store);
+
+        // 2. Legacy DB with explicitly persisted syncBatchLimit = 8 and custom apiModel override:
+        //    migrates 8 -> 4 while preserving the saved provider and model override, and is idempotent.
+        let legacy_8_dir = TempDir::new().unwrap();
+        let legacy_8_path = legacy_8_dir.path().join("legacy8.db");
+        {
+            let conn = Connection::open(&legacy_8_path).unwrap();
+            conn.execute(
+                "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO app_settings (key, value_json) VALUES (?1, ?2)",
+                params![
+                    SETTINGS_ROW_KEY,
+                    r#"{"syncBatchLimit":8,"apiProvider":"openai","apiModel":"gpt-4.1-mini"}"#
+                ],
+            )
+            .unwrap();
+        }
+        let legacy_8_store = Store::open(&legacy_8_path).unwrap();
+        let migrated = legacy_8_store.get_settings().unwrap();
+        assert_eq!(migrated.sync_batch_limit, 4);
+        assert_eq!(migrated.api_provider, "openai");
+        assert_eq!(migrated.api_model, "gpt-4.1-mini");
+
+        // Explicitly re-saving 8 after the one-time migration must stick across reopens.
+        let mut user_set_8 = migrated;
+        user_set_8.sync_batch_limit = 8;
+        legacy_8_store.save_settings(&user_set_8).unwrap();
+        drop(legacy_8_store);
+        let reopened_8 = Store::open(&legacy_8_path).unwrap();
+        assert_eq!(reopened_8.get_settings().unwrap().sync_batch_limit, 8);
+        drop(reopened_8);
+
+        // 3. Legacy DB with persisted partial row omitting syncBatchLimit and apiModel:
+        //    migration leaves the raw row untouched and deserialization derives the provider's model.
+        let legacy_partial_dir = TempDir::new().unwrap();
+        let legacy_partial_path = legacy_partial_dir.path().join("legacy_partial.db");
+        let raw_partial = r#"{"language":"en","apiProvider":"deepseek"}"#;
+        {
+            let conn = Connection::open(&legacy_partial_path).unwrap();
+            conn.execute(
+                "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO app_settings (key, value_json) VALUES (?1, ?2)",
+                params![SETTINGS_ROW_KEY, raw_partial],
+            )
+            .unwrap();
+        }
+        let partial_store = Store::open(&legacy_partial_path).unwrap();
+        let stored_after: String = partial_store
+            .connection()
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = ?1",
+                params![SETTINGS_ROW_KEY],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_after, raw_partial);
+        let loaded_partial = partial_store.get_settings().unwrap();
+        assert_eq!(loaded_partial.language, "en");
+        assert_eq!(loaded_partial.api_provider, "deepseek");
+        assert_eq!(
+            loaded_partial.api_model,
+            crate::defaults::api_provider("deepseek")
+                .unwrap()
+                .default_model
+        );
+        drop(partial_store);
+
+        // 4. Legacy DB with explicitly persisted custom syncBatchLimit (12) stays untouched.
+        let legacy_12_dir = TempDir::new().unwrap();
+        let legacy_12_path = legacy_12_dir.path().join("legacy12.db");
+        {
+            let conn = Connection::open(&legacy_12_path).unwrap();
+            conn.execute(
+                "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO app_settings (key, value_json) VALUES (?1, ?2)",
+                params![SETTINGS_ROW_KEY, r#"{"syncBatchLimit":12}"#],
+            )
+            .unwrap();
+        }
+        let store_12 = Store::open(&legacy_12_path).unwrap();
+        assert_eq!(store_12.get_settings().unwrap().sync_batch_limit, 12);
     }
 
     #[test]
