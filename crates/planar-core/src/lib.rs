@@ -8,6 +8,7 @@
 
 pub mod burst;
 pub mod db;
+pub mod defaults;
 pub mod env;
 pub mod error;
 pub mod ingest;

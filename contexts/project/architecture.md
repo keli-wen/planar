@@ -10,7 +10,8 @@
 planar/
 ├── crates/planar-core/src/     # Shared Rust engine (unsafe_code = "forbid", unwrap_used = "deny")
 │   ├── lib.rs                  # Public crate exports
-│   ├── model.rs                # Wire DTOs, AppSettings, OKLab palettes, sentinels
+│   ├── defaults.rs             # Embedded ui/defaults.json SSOT (LazyLock), API provider catalog, Rust tuning constants & bounds
+│   ├── model.rs                # Wire DTOs, AppSettings (delegating defaults to defaults.rs), re-exported palettes & sentinels
 │   ├── error.rs                # PlanarError (thiserror) & Result<T>
 │   ├── env.rs                  # Harness log roots, login-shell PATH hydration, CLI binary & resume-cmd helpers
 │   ├── burst.rs                # Clamped burst union (IDLE_GAP_CAP_MS = 12m, MIN_BURST_MS = 60s) & day projection
@@ -32,9 +33,10 @@ planar/
 │   ├── main.rs                 # Desktop entrypoint
 │   └── lib.rs                  # Thin Tauri v2 window + macOS Menu-Bar tray hosting embedded Axum server
 ├── ui/                         # Zero-dependency vanilla HTML/CSS/ESM frontend (see contexts/engineering/ui-zero-fork.md)
-│   ├── index.html              # Single-page shell + palette metadata
+│   ├── defaults.json           # Cross-surface declarative SSOT (API providers, defaultSettings, Light/Dark palettes, harness/CLI order)
+│   ├── index.html              # Single-page shell
 │   ├── styles.css              # Light/Dark tokens, @container narrow sidebar breakpoints, animations
-│   └── app.js                  # State store, SVG bandProfile/bandPath renderer, RECAP card, DnD deps, Settings
+│   └── app.js                  # State store (loads ./defaults.json), SVG bandProfile/bandPath renderer, RECAP card, DnD deps, Settings
 ├── skills/planar/SKILL.md      # Shipped user-facing planning skill (L0 -> L1 -> L2)
 └── scripts/                    # Zero-dependency preview, hygiene checker, and agent hook guards
 ```
@@ -69,7 +71,7 @@ flowchart LR
    - Sessions with an existing digest whose `source_path` no longer exists on disk are **permanently locked**.
 2. `slice_trajectory_file` streams the source JSONL read-only, skips tool payloads and `[PLANAR_INTERNAL_DIGEST]` echoes, and extracts `head`, `middle_users`, and `tail`.
 3. Candidates are chunked by `sync_batch_limit` (default `4`, capped at `72,000` chars per prompt) and dispatched to either:
-   - **Local CLI mode** (`agy`, `codex`, `dsh`, or `claude` in stateless/read-only print mode with `AUTO_CLI_ORDER = ["antigravity", "codex", "dsh", "claude"]`), or
+   - **Local CLI mode** (`agy`, `codex`, `dsh`, or `claude` in stateless/read-only print mode with `cliEngineOrder = ["antigravity", "codex", "dsh", "claude"]` from `ui/defaults.json`), or
    - **Direct API mode** (`gemini`, `anthropic`, `openai`, `deepseek`, `openrouter`, `xai`, `groq`, `mistral`, `siliconflow`, `moonshot`, `ollama`, or `openai-compatible`).
 4. `apply_session_digest` updates `session_digests` + `sessions_fts`, and assigns `line_id` **only when** `line_id IS NULL` or the current Line is unpinned (`pinned = 0`).
 5. `regroup_discovered_lines` clusters only sessions inside unpinned non-system Lines (`pinned = 0 AND is_system_bucket = 0`), passing pinned Lines + `Scope:` descriptions as exemplars, and prunes newly empty unpinned Lines.

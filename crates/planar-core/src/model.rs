@@ -2,31 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// `OKLab` & CVD-validated categorical line palette (`contexts/project/design.md §4.3`).
-pub const PALETTE: [&str; 6] = [
-    "#A43D74", // Rose Berry
-    "#2E8540", // Forest Green
-    "#784BA8", // Iris Violet
-    "#B84A32", // Terracotta Red
-    "#008778", // Slate Teal
-    "#2656C4", // Cobalt Blue
-];
-
-/// Dark-surface (`#121418`) `OKLab` & CVD-validated categorical line palette.
-pub const DARK_PALETTE: [&str; 6] = [
-    "#D8659D", // Soft Rose
-    "#3BA755", // Vivid Meadow
-    "#9B72CF", // Bright Iris
-    "#D9684E", // Warm Coral
-    "#1CA99A", // Luminous Teal
-    "#4B7BEC", // Bright Cobalt
-];
-
-/// Sentinel marker placed inside internal CLI digest prompts so scanners never re-ingest them.
-pub const INTERNAL_DIGEST_SENTINEL: &str = "[PLANAR_INTERNAL_DIGEST]";
-
-/// Reserved slug for the pinned `One-off` system bucket line.
-pub const ONE_OFF_LINE_ID: &str = "one-off";
+pub use crate::defaults::{INTERNAL_DIGEST_SENTINEL, ONE_OFF_LINE_ID, dark_palette, palette};
 
 /// Per-harness enablement toggles stored in `AppSettings`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,12 +16,7 @@ pub struct EnabledHarnesses {
 
 impl Default for EnabledHarnesses {
     fn default() -> Self {
-        Self {
-            antigravity: true,
-            claude: true,
-            codex: true,
-            dsh: true,
-        }
+        crate::defaults::default_enabled_harnesses()
     }
 }
 
@@ -63,7 +34,7 @@ impl EnabledHarnesses {
 }
 
 /// Optional custom log directory paths per harness.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct HarnessPathOverrides {
     pub antigravity: String,
@@ -72,17 +43,19 @@ pub struct HarnessPathOverrides {
     pub dsh: String,
 }
 
+impl Default for HarnessPathOverrides {
+    fn default() -> Self {
+        crate::defaults::default_harness_paths()
+    }
+}
+
 const fn default_true() -> bool {
     true
 }
 
-fn default_metric_lens() -> String {
-    "time".to_string()
-}
-
 /// User settings persisted in SQLite and shared with `./ui`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", from = "AppSettingsWire")]
 pub struct AppSettings {
     pub auto_sync: String,
     pub fewest_user_inputs: u32,
@@ -96,7 +69,6 @@ pub struct AppSettings {
     pub sessions_shown_per_line: usize,
     pub language: String,
     pub theme: String,
-    #[serde(default = "default_metric_lens")]
     pub metric_lens: String,
     pub show_contribution_graph: bool,
     pub processor_configured: bool,
@@ -113,36 +85,110 @@ pub struct AppSettings {
     pub harness_paths: HarnessPathOverrides,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AppSettingsWire {
+    auto_sync: String,
+    fewest_user_inputs: u32,
+    show_short_on_timeline: bool,
+    include_archived: bool,
+    opening_steps: u32,
+    closing_steps: u32,
+    model: String,
+    longest_user_chars: u32,
+    longest_agent_chars: u32,
+    sessions_shown_per_line: usize,
+    language: String,
+    theme: String,
+    metric_lens: String,
+    show_contribution_graph: bool,
+    processor_configured: bool,
+    processor_mode: String,
+    cli_harness: String,
+    cli_model: String,
+    cli_bin_override: String,
+    api_provider: String,
+    api_base_url: String,
+    api_model: Option<String>,
+    api_key: String,
+    sync_batch_limit: usize,
+    enabled_harnesses: EnabledHarnesses,
+    harness_paths: HarnessPathOverrides,
+}
+
+impl Default for AppSettingsWire {
+    fn default() -> Self {
+        let defaults = crate::defaults::default_settings();
+        Self {
+            auto_sync: defaults.auto_sync,
+            fewest_user_inputs: defaults.fewest_user_inputs,
+            show_short_on_timeline: defaults.show_short_on_timeline,
+            include_archived: defaults.include_archived,
+            opening_steps: defaults.opening_steps,
+            closing_steps: defaults.closing_steps,
+            model: defaults.model,
+            longest_user_chars: defaults.longest_user_chars,
+            longest_agent_chars: defaults.longest_agent_chars,
+            sessions_shown_per_line: defaults.sessions_shown_per_line,
+            language: defaults.language,
+            theme: defaults.theme,
+            metric_lens: defaults.metric_lens,
+            show_contribution_graph: defaults.show_contribution_graph,
+            processor_configured: defaults.processor_configured,
+            processor_mode: defaults.processor_mode,
+            cli_harness: defaults.cli_harness,
+            cli_model: defaults.cli_model,
+            cli_bin_override: defaults.cli_bin_override,
+            api_provider: defaults.api_provider,
+            api_base_url: defaults.api_base_url,
+            api_model: None,
+            api_key: defaults.api_key,
+            sync_batch_limit: defaults.sync_batch_limit,
+            enabled_harnesses: defaults.enabled_harnesses,
+            harness_paths: defaults.harness_paths,
+        }
+    }
+}
+
+impl From<AppSettingsWire> for AppSettings {
+    fn from(wire: AppSettingsWire) -> Self {
+        let api_model = wire
+            .api_model
+            .unwrap_or_else(|| crate::defaults::default_api_model_for_provider(&wire.api_provider));
+        Self {
+            auto_sync: wire.auto_sync,
+            fewest_user_inputs: wire.fewest_user_inputs,
+            show_short_on_timeline: wire.show_short_on_timeline,
+            include_archived: wire.include_archived,
+            opening_steps: wire.opening_steps,
+            closing_steps: wire.closing_steps,
+            model: wire.model,
+            longest_user_chars: wire.longest_user_chars,
+            longest_agent_chars: wire.longest_agent_chars,
+            sessions_shown_per_line: wire.sessions_shown_per_line,
+            language: wire.language,
+            theme: wire.theme,
+            metric_lens: wire.metric_lens,
+            show_contribution_graph: wire.show_contribution_graph,
+            processor_configured: wire.processor_configured,
+            processor_mode: wire.processor_mode,
+            cli_harness: wire.cli_harness,
+            cli_model: wire.cli_model,
+            cli_bin_override: wire.cli_bin_override,
+            api_provider: wire.api_provider,
+            api_base_url: wire.api_base_url,
+            api_model,
+            api_key: wire.api_key,
+            sync_batch_limit: wire.sync_batch_limit,
+            enabled_harnesses: wire.enabled_harnesses,
+            harness_paths: wire.harness_paths,
+        }
+    }
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
-        Self {
-            auto_sync: "Every day".to_string(),
-            fewest_user_inputs: 3,
-            show_short_on_timeline: false,
-            include_archived: false,
-            opening_steps: 20,
-            closing_steps: 40,
-            model: "Flash Lite".to_string(),
-            longest_user_chars: 1200,
-            longest_agent_chars: 1500,
-            sessions_shown_per_line: 8,
-            language: "zh".to_string(),
-            theme: "system".to_string(),
-            metric_lens: default_metric_lens(),
-            show_contribution_graph: true,
-            processor_configured: false,
-            processor_mode: "cli".to_string(),
-            cli_harness: String::new(),
-            cli_model: String::new(),
-            cli_bin_override: String::new(),
-            api_provider: "gemini".to_string(),
-            api_base_url: String::new(),
-            api_model: "gemini-2.5-flash-lite".to_string(),
-            api_key: String::new(),
-            sync_batch_limit: 4,
-            enabled_harnesses: EnabledHarnesses::default(),
-            harness_paths: HarnessPathOverrides::default(),
-        }
+        crate::defaults::default_settings()
     }
 }
 

@@ -16,6 +16,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 use crate::db::{LineUpdate, SessionLaunchInfo, Store, SyncScope};
+use crate::defaults::{AUTO_SCAN_THROTTLE_MS, DEFAULTS_JSON};
 use crate::env::HarnessRoots;
 use crate::error::{PlanarError, Result};
 use crate::ingest::scan_all_harnesses;
@@ -23,8 +24,6 @@ use crate::model::{
     AppSettings, LineIdUpdate, PlaneResponse, ProcessorTestResult, SyncStreamEvent, SyncSummaryDto,
 };
 use crate::processor;
-
-const AUTO_SCAN_THROTTLE_MS: i64 = 3_000;
 
 const INDEX_HTML: &str = include_str!("../../../ui/index.html");
 const STYLES_CSS: &str = include_str!("../../../ui/styles.css");
@@ -274,6 +273,10 @@ pub fn build_embedded_router(state: AppState) -> Router {
         .route(
             "/ui/app.js",
             get(|| async { static_asset("application/javascript; charset=utf-8", APP_JS) }),
+        )
+        .route(
+            "/ui/defaults.json",
+            get(|| async { static_asset("application/json; charset=utf-8", DEFAULTS_JSON) }),
         )
         .route(
             "/assets/icon.svg",
@@ -899,6 +902,7 @@ mod tests {
         fs::create_dir_all(&assets_dir).unwrap();
         fs::write(ui_dir.join("index.html"), "<html>ok</html>").unwrap();
         fs::write(ui_dir.join("app.js"), "console.log('ok');").unwrap();
+        fs::write(ui_dir.join("defaults.json"), DEFAULTS_JSON).unwrap();
         let app = build_router(state, &ui_dir, &assets_dir);
 
         let ui_res = app
@@ -919,6 +923,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(js_res.status(), StatusCode::OK);
+
+        let (defaults_st, defaults_json) =
+            send_json(app.clone(), Method::GET, "/ui/defaults.json", None).await;
+        assert_eq!(defaults_st, StatusCode::OK);
+        assert!(defaults_json["apiProviders"].is_array());
 
         let (st, plane) = send_json(app.clone(), Method::GET, "/api/plane?days=7", None).await;
         assert_eq!(st, StatusCode::OK);
@@ -1059,7 +1068,13 @@ mod tests {
         Store::open(&db_path).unwrap();
         let app = build_embedded_router(AppState::new(db_path, test_roots(dir.path())));
 
-        for uri in ["/ui/", "/ui/styles.css", "/ui/app.js", "/assets/icon.svg"] {
+        for uri in [
+            "/ui/",
+            "/ui/styles.css",
+            "/ui/app.js",
+            "/ui/defaults.json",
+            "/assets/icon.svg",
+        ] {
             let res = app
                 .clone()
                 .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -1067,6 +1082,14 @@ mod tests {
                 .unwrap();
             assert_eq!(res.status(), StatusCode::OK, "failed embedded asset {uri}");
         }
+
+        let (defaults_st, defaults_json) =
+            send_json(app.clone(), Method::GET, "/ui/defaults.json", None).await;
+        assert_eq!(defaults_st, StatusCode::OK);
+        assert_eq!(
+            defaults_json["palette"].as_array().unwrap().len(),
+            crate::defaults::EXPECTED_PALETTE_LEN
+        );
 
         let (st, health) = send_json(app.clone(), Method::GET, "/api/health", None).await;
         assert_eq!(st, StatusCode::OK);

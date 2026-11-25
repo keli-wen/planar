@@ -2,11 +2,7 @@ use chrono::{DateTime, Duration, FixedOffset, LocalResult, NaiveDate, TimeZone};
 
 use crate::model::BurstTuple;
 
-/// Maximum idle gap between consecutive events merged into one active burst (`12 min`).
-pub const IDLE_GAP_CAP_MS: i64 = 12 * 60 * 1000;
-
-/// Minimum visual and accounting floor applied when projecting stored bursts onto days (`1 min`).
-pub const MIN_BURST_MS: i64 = 60 * 1000;
+pub use crate::defaults::{IDLE_GAP_CAP_MS, MIN_BURST_MS};
 
 /// Raw inclusive activity span `[start_ms, end_ms]` in Unix milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

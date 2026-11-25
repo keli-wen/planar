@@ -1,0 +1,213 @@
+{
+  "palette": [
+    "#A43D74",
+    "#2E8540",
+    "#784BA8",
+    "#B84A32",
+    "#008778",
+    "#2656C4"
+  ],
+  "darkPalette": [
+    "#D8659D",
+    "#3BA755",
+    "#9B72CF",
+    "#D9684E",
+    "#1CA99A",
+    "#4B7BEC"
+  ],
+  "harnessOrder": [
+    "antigravity",
+    "claude",
+    "codex",
+    "dsh"
+  ],
+  "cliEngineOrder": [
+    "antigravity",
+    "codex",
+    "dsh",
+    "claude"
+  ],
+  "shortThresholdOptions": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    8,
+    10
+  ],
+  "defaultSettings": {
+    "autoSync": "Every day",
+    "fewestUserInputs": 3,
+    "showShortOnTimeline": false,
+    "includeArchived": false,
+    "openingSteps": 20,
+    "closingSteps": 40,
+    "model": "Flash Lite",
+    "longestUserChars": 1200,
+    "longestAgentChars": 1500,
+    "sessionsShownPerLine": 8,
+    "language": "zh",
+    "theme": "system",
+    "metricLens": "time",
+    "showContributionGraph": true,
+    "processorConfigured": false,
+    "processorMode": "cli",
+    "cliHarness": "",
+    "cliModel": "",
+    "cliBinOverride": "",
+    "apiProvider": "gemini",
+    "apiBaseUrl": "",
+    "apiModel": "",
+    "apiKey": "",
+    "syncBatchLimit": 4,
+    "enabledHarnesses": {
+      "antigravity": true,
+      "claude": true,
+      "codex": true,
+      "dsh": true
+    },
+    "harnessPaths": {
+      "antigravity": "",
+      "claude": "",
+      "codex": "",
+      "dsh": ""
+    }
+  },
+  "apiProviders": [
+    {
+      "id": "gemini",
+      "labelZh": "Google Gemini",
+      "labelEn": "Google Gemini",
+      "defaultBase": "https://generativelanguage.googleapis.com/v1beta",
+      "defaultModel": "gemini-2.5-flash-lite",
+      "envVars": [
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY"
+      ],
+      "allowKeyless": false
+    },
+    {
+      "id": "openai",
+      "labelZh": "OpenAI",
+      "labelEn": "OpenAI",
+      "defaultBase": "https://api.openai.com/v1",
+      "defaultModel": "gpt-4o-mini",
+      "envVars": [
+        "OPENAI_API_KEY"
+      ],
+      "allowKeyless": false
+    },
+    {
+      "id": "anthropic",
+      "labelZh": "Anthropic",
+      "labelEn": "Anthropic",
+      "defaultBase": "https://api.anthropic.com/v1",
+      "defaultModel": "claude-3-5-haiku-latest",
+      "envVars": [
+        "ANTHROPIC_API_KEY"
+      ],
+      "allowKeyless": false
+    },
+    {
+      "id": "deepseek",
+      "labelZh": "DeepSeek",
+      "labelEn": "DeepSeek",
+      "defaultBase": "https://api.deepseek.com/v1",
+      "defaultModel": "deepseek-chat",
+      "envVars": [
+        "DEEPSEEK_API_KEY"
+      ],
+      "allowKeyless": false
+    },
+    {
+      "id": "openrouter",
+      "labelZh": "OpenRouter",
+      "labelEn": "OpenRouter",
+      "defaultBase": "https://openrouter.ai/api/v1",
+      "defaultModel": "google/gemini-2.5-flash-lite",
+      "envVars": [
+        "OPENROUTER_API_KEY"
+      ],
+      "allowKeyless": false
+    },
+    {
+      "id": "xai",
+      "labelZh": "xAI (Grok)",
+      "labelEn": "xAI (Grok)",
+      "defaultBase": "https://api.x.ai/v1",
+      "defaultModel": "grok-3-mini",
+      "envVars": [
+        "XAI_API_KEY"
+      ],
+      "allowKeyless": false
+    },
+    {
+      "id": "groq",
+      "labelZh": "Groq",
+      "labelEn": "Groq",
+      "defaultBase": "https://api.groq.com/openai/v1",
+      "defaultModel": "llama-3.3-70b-versatile",
+      "envVars": [
+        "GROQ_API_KEY"
+      ],
+      "allowKeyless": false
+    },
+    {
+      "id": "mistral",
+      "labelZh": "Mistral",
+      "labelEn": "Mistral",
+      "defaultBase": "https://api.mistral.ai/v1",
+      "defaultModel": "ministral-8b-latest",
+      "envVars": [
+        "MISTRAL_API_KEY"
+      ],
+      "allowKeyless": false
+    },
+    {
+      "id": "siliconflow",
+      "labelZh": "SiliconFlow (硅基流动)",
+      "labelEn": "SiliconFlow",
+      "defaultBase": "https://api.siliconflow.cn/v1",
+      "defaultModel": "Qwen/Qwen2.5-7B-Instruct",
+      "envVars": [
+        "SILICONFLOW_API_KEY"
+      ],
+      "allowKeyless": false
+    },
+    {
+      "id": "moonshot",
+      "labelZh": "Moonshot (Kimi)",
+      "labelEn": "Moonshot (Kimi)",
+      "defaultBase": "https://api.moonshot.cn/v1",
+      "defaultModel": "moonshot-v1-8k",
+      "envVars": [
+        "MOONSHOT_API_KEY"
+      ],
+      "allowKeyless": false
+    },
+    {
+      "id": "ollama",
+      "labelZh": "Ollama (本地)",
+      "labelEn": "Ollama (Local)",
+      "defaultBase": "http://127.0.0.1:11434/v1",
+      "defaultModel": "qwen2.5:7b",
+      "envVars": [
+        "OLLAMA_API_KEY"
+      ],
+      "allowKeyless": true
+    },
+    {
+      "id": "openai-compatible",
+      "labelZh": "OpenAI 兼容网关",
+      "labelEn": "OpenAI Compatible",
+      "defaultBase": "http://127.0.0.1:8000/v1",
+      "defaultModel": "gpt-4o-mini",
+      "envVars": [
+        "OPENAI_API_KEY"
+      ],
+      "allowKeyless": false,
+      "requiresBaseUrl": true
+    }
+  ]
+}

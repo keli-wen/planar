@@ -10,134 +10,38 @@
 // 4. Ascending 3-step staircase Priority icons (including white staircase inside Urgent badge)
 // 5. Zero-jitter scrollbar reservation + synchronous plot measurement + full responsive layout down to 320px
 
-const PALETTE = [
-  "#A43D74", // Rose Berry
-  "#2E8540", // Forest Green
-  "#784BA8", // Iris Violet
-  "#B84A32", // Terracotta Red
-  "#008778", // Slate Teal
-  "#2656C4", // Cobalt Blue
-];
+async function loadSharedDefaults() {
+  const url = new URL("./defaults.json", import.meta.url);
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`Failed to load ${url.pathname}: HTTP ${res.status}`);
+  }
+  return res.json();
+}
 
-const DARK_PALETTE = [
-  "#D8659D", // Soft Rose
-  "#3BA755", // Vivid Meadow
-  "#9B72CF", // Bright Iris
-  "#D9684E", // Warm Coral
-  "#1CA99A", // Luminous Teal
-  "#4B7BEC", // Bright Cobalt
-];
+const SHARED_DEFAULTS = await loadSharedDefaults();
+const PALETTE = SHARED_DEFAULTS.palette;
+const DARK_PALETTE = SHARED_DEFAULTS.darkPalette;
+const HARNESS_ORDER = SHARED_DEFAULTS.harnessOrder;
+const CLI_ENGINE_ORDER = SHARED_DEFAULTS.cliEngineOrder;
+const API_PROVIDERS = SHARED_DEFAULTS.apiProviders;
+const SHORT_THRESHOLD_OPTIONS = SHARED_DEFAULTS.shortThresholdOptions;
 
-const HARNESS_ORDER = ["antigravity", "claude", "codex", "dsh"];
-// CLI selector & `auto` fallback priority (`claude` placed strictly last due to strict quota limits)
-const CLI_ENGINE_ORDER = ["antigravity", "codex", "dsh", "claude"];
+function defaultApiModelForProvider(providerId) {
+  const pid = typeof providerId === "string" ? providerId.trim() : "";
+  if (!pid) return "";
+  return API_PROVIDERS.find((p) => p.id.toLowerCase() === pid.toLowerCase())?.defaultModel || "";
+}
 
-const API_PROVIDERS = [
-  {
-    id: "gemini",
-    labelZh: "Google Gemini",
-    labelEn: "Google Gemini",
-    defaultBase: "https://generativelanguage.googleapis.com/v1beta",
-    defaultModel: "gemini-2.5-flash-lite",
-    envVar: "GEMINI_API_KEY",
-  },
-  {
-    id: "openai",
-    labelZh: "OpenAI",
-    labelEn: "OpenAI",
-    defaultBase: "https://api.openai.com/v1",
-    defaultModel: "gpt-4o-mini",
-    envVar: "OPENAI_API_KEY",
-  },
-  {
-    id: "anthropic",
-    labelZh: "Anthropic",
-    labelEn: "Anthropic",
-    defaultBase: "https://api.anthropic.com/v1",
-    defaultModel: "claude-3-5-haiku-latest",
-    envVar: "ANTHROPIC_API_KEY",
-  },
-  {
-    id: "deepseek",
-    labelZh: "DeepSeek",
-    labelEn: "DeepSeek",
-    defaultBase: "https://api.deepseek.com/v1",
-    defaultModel: "deepseek-chat",
-    envVar: "DEEPSEEK_API_KEY",
-  },
-  {
-    id: "openrouter",
-    labelZh: "OpenRouter",
-    labelEn: "OpenRouter",
-    defaultBase: "https://openrouter.ai/api/v1",
-    defaultModel: "google/gemini-2.5-flash-lite",
-    envVar: "OPENROUTER_API_KEY",
-  },
-  {
-    id: "xai",
-    labelZh: "xAI (Grok)",
-    labelEn: "xAI (Grok)",
-    defaultBase: "https://api.x.ai/v1",
-    defaultModel: "grok-3-mini",
-    envVar: "XAI_API_KEY",
-  },
-  {
-    id: "groq",
-    labelZh: "Groq",
-    labelEn: "Groq",
-    defaultBase: "https://api.groq.com/openai/v1",
-    defaultModel: "llama-3.3-70b-versatile",
-    envVar: "GROQ_API_KEY",
-  },
-  {
-    id: "mistral",
-    labelZh: "Mistral",
-    labelEn: "Mistral",
-    defaultBase: "https://api.mistral.ai/v1",
-    defaultModel: "ministral-8b-latest",
-    envVar: "MISTRAL_API_KEY",
-  },
-  {
-    id: "siliconflow",
-    labelZh: "SiliconFlow (硅基流动)",
-    labelEn: "SiliconFlow",
-    defaultBase: "https://api.siliconflow.cn/v1",
-    defaultModel: "Qwen/Qwen2.5-7B-Instruct",
-    envVar: "SILICONFLOW_API_KEY",
-  },
-  {
-    id: "moonshot",
-    labelZh: "Moonshot (Kimi)",
-    labelEn: "Moonshot (Kimi)",
-    defaultBase: "https://api.moonshot.cn/v1",
-    defaultModel: "moonshot-v1-8k",
-    envVar: "MOONSHOT_API_KEY",
-  },
-  {
-    id: "ollama",
-    labelZh: "Ollama (本地)",
-    labelEn: "Ollama (Local)",
-    defaultBase: "http://127.0.0.1:11434/v1",
-    defaultModel: "qwen2.5:7b",
-    envVar: "",
-    localKeyless: true,
-  },
-  {
-    id: "openai-compatible",
-    labelZh: "OpenAI 兼容网关",
-    labelEn: "OpenAI Compatible",
-    defaultBase: "http://127.0.0.1:8000/v1",
-    defaultModel: "gpt-4o-mini",
-    envVar: "OPENAI_API_KEY",
-  },
-];
+const DEFAULT_SETTINGS = {
+  ...SHARED_DEFAULTS.defaultSettings,
+  apiModel: defaultApiModelForProvider(SHARED_DEFAULTS.defaultSettings.apiProvider),
+};
 
 const LANG_OPTIONS = [
   { id: "zh", label: "简体中文", code: "zh-CN" },
   { id: "en", label: "English", code: "en-US" },
 ];
-
-const SHORT_THRESHOLD_OPTIONS = [2, 3, 4, 5, 6, 8, 10];
 
 const HARNESS_META = {
   antigravity: {
@@ -177,6 +81,11 @@ const HARNESS_META = {
     path: "M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.14.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.73 1.73 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z",
   },
 };
+
+const CLI_AUTO_ORDER_TEXT = CLI_ENGINE_ORDER.map((id) => HARNESS_META[id]?.cli || id).join(" → ");
+const API_MODEL_EXAMPLES = ["gemini", "anthropic", "deepseek"]
+  .map((id) => API_PROVIDERS.find((p) => p.id === id)?.defaultModel)
+  .filter(Boolean);
 
 const I18N = {
   zh: {
@@ -303,7 +212,7 @@ const I18N = {
     keyHide: "隐藏",
     keyLocalNote: "密钥仅保存在本机 ~/.planar，不会上传到任何第三方服务。",
     lblCliHarness: "首选 CLI 引擎",
-    descCliHarness: "自动模式将按已就绪顺序挑选 agy → codex → dsh → claude。",
+    descCliHarness: `自动模式将按已就绪顺序挑选 ${CLI_AUTO_ORDER_TEXT}。`,
     lblCliModel: "模型名称",
     descCliModel: "留空使用该 CLI 默认推荐轻量模型。",
     lblCliBin: "可执行文件路径",
@@ -314,7 +223,7 @@ const I18N = {
     lblApiUrl: "Base URL",
     descApiUrl: "本地或兼容网关必填；官方端点留空即可。",
     lblApiModel: "模型名称",
-    descApiModel: "如 gemini-2.5-flash-lite、claude-3-5-haiku-latest、deepseek-chat。",
+    descApiModel: `如 ${API_MODEL_EXAMPLES.join("、")}。`,
     lblApiKey: "API Key",
     descApiKey: "留空时自动尝试读取对应环境变量（如 DEEPSEEK_API_KEY）。",
     lblBatchLimit: "单批归纳会话上限",
@@ -372,7 +281,7 @@ const I18N = {
     sourcePrunedTip: "源轨迹日志已被对应工具清理，已保留摘要与时间跨度",
     selectCliPlaceholder: "选择 CLI 引擎…",
     cliAutoOption: "自动按序回退",
-    cliAutoOrderMeta: "agy → codex → dsh → claude",
+    cliAutoOrderMeta: CLI_AUTO_ORDER_TEXT,
     cliModelPlaceholder: "默认轻量模型（如 flash / gpt-5-mini）",
     cliBinPlaceholder: "自动从 PATH 解析（可选绝对路径）",
     apiKeyEnvPlaceholder: "{env} 或粘贴密钥",
@@ -538,7 +447,7 @@ const I18N = {
     keyHide: "Hide",
     keyLocalNote: "Stored locally in ~/.planar and never uploaded elsewhere.",
     lblCliHarness: "Preferred CLI engine",
-    descCliHarness: "Auto picks the first ready CLI in order: agy → codex → dsh → claude.",
+    descCliHarness: `Auto picks the first ready CLI in order: ${CLI_AUTO_ORDER_TEXT}.`,
     lblCliModel: "Model",
     descCliModel: "Leave empty to use the CLI's default fast model.",
     lblCliBin: "Executable path",
@@ -549,7 +458,7 @@ const I18N = {
     lblApiUrl: "Base URL",
     descApiUrl: "Required for local/compatible gateways; leave empty for official endpoints.",
     lblApiModel: "Model ID",
-    descApiModel: "e.g. gemini-2.5-flash-lite, claude-3-5-haiku-latest, deepseek-chat.",
+    descApiModel: `e.g. ${API_MODEL_EXAMPLES.join(", ")}.`,
     lblApiKey: "API key",
     descApiKey: "Leave empty to read standard environment variables (e.g. DEEPSEEK_API_KEY).",
     lblBatchLimit: "Max sessions per Sync batch",
@@ -607,7 +516,7 @@ const I18N = {
     sourcePrunedTip: "Source transcript was cleaned up by its harness; summary and timeline spans are preserved",
     selectCliPlaceholder: "Select CLI engine…",
     cliAutoOption: "Auto fallback",
-    cliAutoOrderMeta: "agy → codex → dsh → claude",
+    cliAutoOrderMeta: CLI_AUTO_ORDER_TEXT,
     cliModelPlaceholder: "Default fast model (e.g. flash / gpt-5-mini)",
     cliBinPlaceholder: "Resolved from PATH (optional full path)",
     apiKeyEnvPlaceholder: "{env} or paste key",
@@ -674,45 +583,6 @@ const MD3_SHAPES = {
     "M10.12 7.00C10.12 7.50 8.84 7.53 8.19 8.19C7.53 8.84 7.50 10.12 7.00 10.12C6.50 10.12 6.47 8.84 5.81 8.19C5.16 7.53 3.88 7.50 3.88 7.00C3.88 6.50 5.16 6.47 5.81 5.81C6.47 5.16 6.50 3.88 7.00 3.88C7.50 3.88 7.53 5.16 8.19 5.81C8.84 6.47 10.12 6.50 10.12 7.00Z",
   squircle:
     "M9.55 7.00C9.55 7.82 9.60 8.61 9.11 9.11C8.61 9.60 7.82 9.55 7.00 9.55C6.18 9.55 5.39 9.60 4.89 9.11C4.40 8.61 4.45 7.82 4.45 7.00C4.45 6.18 4.40 5.39 4.89 4.89C5.39 4.40 6.18 4.45 7.00 4.45C7.82 4.45 8.61 4.40 9.11 4.89C9.60 5.39 9.55 6.18 9.55 7.00Z",
-};
-
-const DEFAULT_SETTINGS = {
-  autoSync: "Every day",
-  fewestUserInputs: 3,
-  showShortOnTimeline: false,
-  includeArchived: false,
-  openingSteps: 20,
-  closingSteps: 40,
-  model: "Flash Lite",
-  longestUserChars: 1200,
-  longestAgentChars: 1500,
-  sessionsShownPerLine: 8,
-  language: "zh",
-  theme: "system",
-  metricLens: "time",
-  showContributionGraph: true,
-  processorConfigured: false,
-  processorMode: "cli",
-  cliHarness: "",
-  cliModel: "",
-  cliBinOverride: "",
-  apiProvider: "gemini",
-  apiBaseUrl: "",
-  apiModel: "gemini-2.5-flash-lite",
-  apiKey: "",
-  syncBatchLimit: 4,
-  enabledHarnesses: {
-    antigravity: true,
-    claude: true,
-    codex: true,
-    dsh: true,
-  },
-  harnessPaths: {
-    antigravity: "",
-    claude: "",
-    codex: "",
-    dsh: "",
-  },
 };
 
 function buildMockContributions() {
@@ -1335,7 +1205,8 @@ const state = {
 
 // Helpers: Locale, Theme, Harnesses & Metrics
 function lang() {
-  return state.settings.language === "en" ? "en" : "zh";
+  const raw = state.settings.language || DEFAULT_SETTINGS.language;
+  return raw === "en" ? "en" : "zh";
 }
 
 function t(key, vars = undefined) {
@@ -1363,7 +1234,7 @@ function localizeRecency(recency) {
 }
 
 function effectiveTheme() {
-  const mode = state.settings.theme || "system";
+  const mode = state.settings.theme || DEFAULT_SETTINGS.theme;
   if (mode === "light" || mode === "dark") return mode;
   return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
 }
@@ -1402,7 +1273,7 @@ function harnessFullLabel(id) {
 
 function isProcessorConfigured(s = state.settings) {
   if (!s?.processorConfigured) return false;
-  if ((s.processorMode || "cli") === "api") {
+  if ((s.processorMode || DEFAULT_SETTINGS.processorMode) === "api") {
     return Boolean((s.apiProvider || "").trim());
   }
   return Boolean((s.cliHarness || "").trim());
@@ -1501,8 +1372,9 @@ function fmtCostCompact(usd) {
 const DEFAULT_VISIBLE_LINES = 8;
 
 function activeMetricLens() {
-  if (state.settings.metricLens === "tokens") return "tokens";
-  if (state.settings.metricLens === "cost") return "cost";
+  const lens = state.settings.metricLens || DEFAULT_SETTINGS.metricLens;
+  if (lens === "tokens") return "tokens";
+  if (lens === "cost") return "cost";
   return "time";
 }
 
@@ -2769,7 +2641,7 @@ function renderTopbar() {
   const isRangeOpen = state.popover?.type === "range-menu";
   const isThemeOpen = state.popover?.type === "theme-menu";
   const pendingCount = state.unsummarized.length;
-  const curTheme = state.settings.theme || "system";
+  const curTheme = state.settings.theme || DEFAULT_SETTINGS.theme;
 
   const rangeControlHtml = state.anchorDate
     ? `<div class="range-anchor-group">
@@ -3728,8 +3600,8 @@ function renderSettingsView(motionCls = "") {
   let tabBody = "";
   if (tab === "general") {
     const curLang = lang();
-    const curTheme = s.theme || "system";
-    const curAutoSync = s.autoSync || "Every day";
+    const curTheme = s.theme || DEFAULT_SETTINGS.theme;
+    const curAutoSync = s.autoSync || DEFAULT_SETTINGS.autoSync;
     const isLangOpen = state.popover?.type === "lang-select";
     const isShortOpen = state.popover?.type === "short-threshold-select";
 
@@ -3833,9 +3705,9 @@ function renderSettingsView(motionCls = "") {
       </section>
     `;
   } else if (tab === "processor") {
-    const isCli = (s.processorMode || "cli") !== "api";
+    const isCli = (s.processorMode || DEFAULT_SETTINGS.processorMode) !== "api";
     const curCli = (s.cliHarness || "").trim();
-    const curApi = (s.apiProvider || "gemini").trim() || "gemini";
+    const curApi = (s.apiProvider || DEFAULT_SETTINGS.apiProvider).trim() || DEFAULT_SETTINGS.apiProvider;
     const provMeta = getApiProviderMeta(curApi);
     const selectedCliMeta = curCli && curCli !== "auto" ? statusById.get(curCli) : null;
     const showMissingCliBanner = Boolean(isCli && selectedCliMeta && !selectedCliMeta.cliAvailable && !s.cliBinOverride);
@@ -3995,9 +3867,9 @@ function renderSettingsView(motionCls = "") {
                     }" class="settings-input is-mono" data-action="setting-text" data-field="apiKey" value="${escapeHtml(
                   s.apiKey || ""
                 )}" placeholder="${escapeHtml(
-                  provMeta.localKeyless
+                  provMeta.allowKeyless
                     ? t("apiKeyLocalOptPlaceholder")
-                    : t("apiKeyEnvPlaceholder", { env: provMeta.envVar })
+                    : t("apiKeyEnvPlaceholder", { env: provMeta.envVars?.[0] || "" })
                 )}" autocomplete="off" />
                     <button type="button" class="btn-outline is-key-toggle" data-action="toggle-apikey-vis">
                       ${escapeHtml(state.showApiKeyPlain ? t("keyHide") : t("keyShow"))}
@@ -4009,7 +3881,7 @@ function renderSettingsView(motionCls = "") {
             <div class="settings-row-title">${escapeHtml(t("lblBatchLimit"))}</div>
             <div class="stepper">
               <button type="button" data-action="step" data-field="syncBatchLimit" data-delta="-1">−</button>
-              <span>${s.syncBatchLimit || 4}</span>
+              <span>${s.syncBatchLimit || DEFAULT_SETTINGS.syncBatchLimit}</span>
               <button type="button" data-action="step" data-field="syncBatchLimit" data-delta="1">+</button>
             </div>
           </div>
@@ -4313,7 +4185,7 @@ function renderSettingsView(motionCls = "") {
   }
 
   const isThemeOpen = state.popover?.type === "theme-menu";
-  const curTheme = s.theme || "system";
+  const curTheme = s.theme || DEFAULT_SETTINGS.theme;
 
   return `
     <div class="settings-page ${motionCls}">
@@ -4696,7 +4568,7 @@ function renderPopoverLayer() {
     const top = Math.max(10, Math.min(window.innerHeight - 140, p.top));
     const anchorRight = typeof p.right === "number" ? p.right : window.innerWidth - 24;
     const left = Math.max(10, Math.min(window.innerWidth - menuW - 10, anchorRight - menuW));
-    const curTheme = state.settings.theme || "system";
+    const curTheme = state.settings.theme || DEFAULT_SETTINGS.theme;
     const themeOptions = [
       { id: "system", label: t("themeSystem") },
       { id: "light", label: t("themeLight") },
@@ -4833,7 +4705,9 @@ function renderPopoverLayer() {
   }
 
   if (p.type === "api-select") {
-    const curApi = (state.settings.apiProvider || "gemini").trim() || "gemini";
+    const curApi =
+      (state.settings.apiProvider || DEFAULT_SETTINGS.apiProvider).trim() ||
+      DEFAULT_SETTINGS.apiProvider;
     const menuW = Math.min(264, window.innerWidth - 20);
     const estH = 296;
     const top = Math.max(10, Math.min(window.innerHeight - estH - 10, p.top));
@@ -4901,7 +4775,7 @@ function renderPopoverLayer() {
   }
 
   if (p.type === "short-threshold-select") {
-    const curN = Number(state.settings.fewestUserInputs) || 3;
+    const curN = Number(state.settings.fewestUserInputs) || DEFAULT_SETTINGS.fewestUserInputs;
     const menuW = Math.min(188, window.innerWidth - 20);
     const estH = 248;
     const top = Math.max(10, Math.min(window.innerHeight - estH - 10, p.top));
@@ -4993,6 +4867,35 @@ let urlThemeOverride = initialUrlParams.get("theme");
 let urlLensOverride = initialUrlParams.get("lens");
 let didInitialApiExpand = false;
 
+function normalizePlaneSettings(rawSettings) {
+  const resolvedApiProvider =
+    typeof rawSettings.apiProvider === "string"
+      ? rawSettings.apiProvider
+      : DEFAULT_SETTINGS.apiProvider;
+  const resolvedApiModel =
+    typeof rawSettings.apiModel === "string"
+      ? rawSettings.apiModel
+      : defaultApiModelForProvider(resolvedApiProvider);
+  const normalizedSettings = {
+    ...DEFAULT_SETTINGS,
+    ...rawSettings,
+    apiProvider: resolvedApiProvider,
+    apiModel: resolvedApiModel,
+    enabledHarnesses: {
+      ...DEFAULT_SETTINGS.enabledHarnesses,
+      ...(rawSettings.enabledHarnesses || {}),
+    },
+    harnessPaths: {
+      ...DEFAULT_SETTINGS.harnessPaths,
+      ...(rawSettings.harnessPaths || {}),
+    },
+  };
+  if (!normalizedSettings.processorConfigured && normalizedSettings.cliHarness === "auto") {
+    normalizedSettings.cliHarness = "";
+  }
+  return normalizedSettings;
+}
+
 function applyPlaneResponse(data) {
   if (!data || !Array.isArray(data.days)) return;
   const wasMock = state.dataSource === "mock";
@@ -5006,22 +4909,7 @@ function applyPlaneResponse(data) {
   state.tzLabel = data.tzLabel || state.tzLabel;
   state.archivedCount = typeof data.archivedCount === "number" ? data.archivedCount : 0;
   if (data.settings) {
-    const normalizedSettings = {
-      ...DEFAULT_SETTINGS,
-      ...data.settings,
-      enabledHarnesses: {
-        ...DEFAULT_SETTINGS.enabledHarnesses,
-        ...(data.settings.enabledHarnesses || {}),
-      },
-      harnessPaths: {
-        ...DEFAULT_SETTINGS.harnessPaths,
-        ...(data.settings.harnessPaths || {}),
-      },
-    };
-    if (!normalizedSettings.processorConfigured && normalizedSettings.cliHarness === "auto") {
-      normalizedSettings.cliHarness = "";
-    }
-    state.settings = normalizedSettings;
+    state.settings = normalizePlaneSettings(data.settings);
   }
   if (urlLangOverride === "zh" || urlLangOverride === "en") {
     state.settings.language = urlLangOverride;
@@ -5355,7 +5243,7 @@ async function runSyncBatches() {
   state.syncAbortController = ctrl;
   render();
 
-  let backendUsed = state.settings.processorMode || "cli";
+  let backendUsed = state.settings.processorMode || DEFAULT_SETTINGS.processorMode;
   let lastErrorMsg = "";
   let stoppedByUser = false;
   try {
@@ -5566,7 +5454,7 @@ document.addEventListener("click", (e) => {
 
   if (action === "set-theme-quick") {
     urlThemeOverride = null;
-    state.settings.theme = btn.dataset.theme || "system";
+    state.settings.theme = btn.dataset.theme || DEFAULT_SETTINGS.theme;
     state.popover = null;
     render();
     persistSettings();
@@ -5575,7 +5463,8 @@ document.addEventListener("click", (e) => {
 
   if (action === "set-metric-lens") {
     const raw = btn.dataset.lens;
-    const nextLens = raw === "tokens" || raw === "cost" ? raw : "time";
+    const nextLens =
+      raw === "tokens" || raw === "cost" || raw === "time" ? raw : DEFAULT_SETTINGS.metricLens;
     urlLensOverride = null;
     if (state.settings.metricLens !== nextLens) {
       state.settings.metricLens = nextLens;
@@ -6122,8 +6011,8 @@ document.addEventListener("click", (e) => {
   }
 
   if (action === "select-api-provider") {
-    const prevProv = getApiProviderMeta(state.settings.apiProvider || "gemini");
-    const nextId = btn.dataset.provider || "gemini";
+    const prevProv = getApiProviderMeta(state.settings.apiProvider || DEFAULT_SETTINGS.apiProvider);
+    const nextId = btn.dataset.provider || DEFAULT_SETTINGS.apiProvider;
     const nextProv = getApiProviderMeta(nextId);
     state.settings.apiProvider = nextId;
     state.settings.processorMode = "api";
@@ -6152,7 +6041,12 @@ document.addEventListener("click", (e) => {
   }
 
   if (action === "select-lang") {
-    const nextLang = btn.dataset.lang === "en" ? "en" : "zh";
+    const nextLang =
+      btn.dataset.lang === "en"
+        ? "en"
+        : btn.dataset.lang === "zh"
+          ? "zh"
+          : DEFAULT_SETTINGS.language;
     urlLangOverride = null;
     state.settings.language = nextLang;
     state.popover = null;
@@ -6175,7 +6069,10 @@ document.addEventListener("click", (e) => {
   }
 
   if (action === "select-short-threshold") {
-    const n = Math.max(1, Math.min(50, Number(btn.dataset.threshold) || 3));
+    const n = Math.max(
+      1,
+      Math.min(50, Number(btn.dataset.threshold) || DEFAULT_SETTINGS.fewestUserInputs)
+    );
     state.settings.fewestUserInputs = n;
     state.popover = null;
     render();
@@ -6187,7 +6084,7 @@ document.addEventListener("click", (e) => {
     if (!isProcessorConfigured(state.settings)) {
       e.stopPropagation();
       if (state.route === "settings" && state.settingsTab === "processor") {
-        if ((state.settings.processorMode || "cli") === "api") {
+        if ((state.settings.processorMode || DEFAULT_SETTINGS.processorMode) === "api") {
           state.settings.processorConfigured = true;
           persistSettings();
           void runSyncBatches();
@@ -6234,7 +6131,7 @@ document.addEventListener("click", (e) => {
 
   if (action === "test-processor") {
     if (state.isTestingProcessor) return;
-    const isCli = (state.settings.processorMode || "cli") !== "api";
+    const isCli = (state.settings.processorMode || DEFAULT_SETTINGS.processorMode) !== "api";
     if (isCli && !(state.settings.cliHarness || "").trim()) {
       const cliBtn = document.getElementById("cli-engine-select-btn");
       if (cliBtn) {
@@ -6275,7 +6172,7 @@ document.addEventListener("click", (e) => {
         .catch((err) => {
           state.processorTestResult = {
             ok: false,
-            backendUsed: state.settings.processorMode || "cli",
+            backendUsed: state.settings.processorMode || DEFAULT_SETTINGS.processorMode,
             latencyMs: 0,
             message: err?.message || "Request failed",
           };
@@ -6292,7 +6189,7 @@ document.addEventListener("click", (e) => {
         ok: true,
         backendUsed:
           state.settings.processorMode === "api"
-            ? `api:${state.settings.apiProvider || "gemini"}`
+            ? `api:${state.settings.apiProvider || DEFAULT_SETTINGS.apiProvider}`
             : `cli:${state.settings.cliHarness || "auto"}`,
         latencyMs: 24,
         message: "OK (mock)",
@@ -6322,7 +6219,10 @@ document.addEventListener("click", (e) => {
             showToast(
               t("toastRegrouped", {
                 n: data.lastSync.processed || 0,
-                backend: data.lastSync.backendUsed || state.settings.processorMode || "cli",
+                backend:
+                  data.lastSync.backendUsed ||
+                  state.settings.processorMode ||
+                  DEFAULT_SETTINGS.processorMode,
               })
             );
           }
@@ -6526,7 +6426,7 @@ document.addEventListener("change", (e) => {
     const field = el.dataset.field;
     state.settings[field] = el.value.trim();
     if (
-      (state.settings.processorMode || "cli") === "api" &&
+      (state.settings.processorMode || DEFAULT_SETTINGS.processorMode) === "api" &&
       (field === "apiBaseUrl" || field === "apiModel" || field === "apiKey")
     ) {
       state.settings.processorConfigured = true;
@@ -7062,7 +6962,7 @@ if (initialUrlParams.get("menu") === "priority") {
 }
 
 window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change", () => {
-  if (state.settings.theme === "system") {
+  if ((state.settings.theme || DEFAULT_SETTINGS.theme) === "system") {
     render();
   }
 });
@@ -7081,3 +6981,5 @@ if (!shouldForceMock(initialUrlParams)) {
     if (document.visibilityState === "visible") refreshIfIdle();
   }, 15000);
 }
+
+export { applyPlaneResponse, DEFAULT_SETTINGS, isProcessorConfigured, state };

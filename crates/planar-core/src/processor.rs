@@ -15,6 +15,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::db::{LineCatalogEntry, SyncCandidate, SyncScope, UnpinnedClusterItem};
+use crate::defaults::{
+    API_TIMEOUT_SECS, CLI_TIMEOUT_SECS, FEWEST_USER_INPUTS_MIN, MAX_BATCH_PROMPT_CHARS,
+    SLICER_CHAR_BUDGET_MIN, STREAM_HEARTBEAT_SECS, SYNC_BATCH_LIMIT_MAX, SYNC_BATCH_LIMIT_MIN,
+    WINDOW_DAYS_MAX, WINDOW_DAYS_MIN, api_provider, cli_engine_order,
+};
 use crate::env::resolve_cli_binary;
 use crate::error::{PlanarError, Result};
 use crate::ingest::antigravity::extract_antigravity_user_request;
@@ -27,13 +32,6 @@ use crate::model::{
     SyncBatchPreviewItem, SyncFiledPreview, SyncStreamEvent, SyncSummaryDto,
 };
 use crate::server::AppState;
-
-const CLI_TIMEOUT_SECS: u64 = 120;
-const API_TIMEOUT_SECS: u64 = 90;
-const STREAM_HEARTBEAT_SECS: u64 = 3;
-const MAX_BATCH_PROMPT_CHARS: usize = 72_000;
-/// Explicit fallback priority when `cli_harness == "auto"`; `claude` is placed last due to strict quota limits.
-pub const AUTO_CLI_ORDER: [&str; 4] = ["antigravity", "codex", "dsh", "claude"];
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -96,11 +94,11 @@ pub fn slice_trajectory_file(
     let mut raw_turns: Vec<(usize, &'static str, String)> = Vec::new();
     let mut user_count = 0_usize;
     let user_limit = usize::try_from(settings.longest_user_chars)
-        .unwrap_or(1200)
-        .max(100);
+        .unwrap_or(usize::MAX)
+        .max(SLICER_CHAR_BUDGET_MIN);
     let agent_limit = usize::try_from(settings.longest_agent_chars)
-        .unwrap_or(1500)
-        .max(100);
+        .unwrap_or(usize::MAX)
+        .max(SLICER_CHAR_BUDGET_MIN);
 
     stream_jsonl_lines(source_path, 0, |line| {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -128,8 +126,8 @@ pub fn slice_trajectory_file(
     })?;
 
     let total_steps = raw_turns.len();
-    let open_n = usize::try_from(settings.opening_steps).unwrap_or(20);
-    let close_n = usize::try_from(settings.closing_steps).unwrap_or(40);
+    let open_n = usize::try_from(settings.opening_steps).unwrap_or(usize::MAX);
+    let close_n = usize::try_from(settings.closing_steps).unwrap_or(usize::MAX);
     let head_end = open_n.min(total_steps);
     let tail_start = total_steps.saturating_sub(close_n).max(head_end);
 
@@ -402,7 +400,7 @@ fn chunk_prepared_into_batches(
     items: Vec<PreparedSession>,
     batch_limit: usize,
 ) -> Vec<Vec<PreparedSession>> {
-    let cap = batch_limit.clamp(1, 50);
+    let cap = batch_limit.clamp(SYNC_BATCH_LIMIT_MIN, SYNC_BATCH_LIMIT_MAX);
     let mut batches: Vec<Vec<PreparedSession>> = Vec::new();
     let mut current: Vec<PreparedSession> = Vec::new();
     let mut current_chars = 0_usize;
@@ -467,7 +465,8 @@ async fn prepare_candidates_for_batching(
     Option<String>,
     Vec<PreparedSession>,
 ) {
-    let min_inputs = usize::try_from(settings.fewest_user_inputs.max(1)).unwrap_or(3);
+    let min_inputs = usize::try_from(settings.fewest_user_inputs.max(FEWEST_USER_INPUTS_MIN))
+        .unwrap_or(usize::MAX);
     let mut pruned_filed = Vec::new();
     let mut skipped_short = 0_usize;
     let mut failed = 0_usize;
@@ -714,8 +713,13 @@ pub async fn sync_pending_sessions_in_scope(
         .with_store(move |store| {
             let settings = store.get_settings()?;
             let slice_hash = compute_slice_config_hash(&settings);
-            let effective_limit =
-                limit_override.or_else(|| Some(settings.sync_batch_limit.clamp(1, 50)));
+            let effective_limit = limit_override.or_else(|| {
+                Some(
+                    settings
+                        .sync_batch_limit
+                        .clamp(SYNC_BATCH_LIMIT_MIN, SYNC_BATCH_LIMIT_MAX),
+                )
+            });
             let candidates = store.load_sync_candidates_in_scope(
                 &settings,
                 &slice_hash,
@@ -795,7 +799,7 @@ async fn run_sync_stream_coordinator(
     limit_override: Option<usize>,
     tx: tokio::sync::mpsc::Sender<SyncStreamEvent>,
 ) {
-    let days = scope.days.clamp(1, 31);
+    let days = scope.days.clamp(WINDOW_DAYS_MIN, WINDOW_DAYS_MAX);
     let anchor = scope.anchor_date;
     let scope_for_query = scope;
 
@@ -839,7 +843,9 @@ async fn run_sync_stream_coordinator(
     };
 
     let default_backend = planned_backend_label(&settings);
-    let batch_size = settings.sync_batch_limit.clamp(1, 50);
+    let batch_size = settings
+        .sync_batch_limit
+        .clamp(SYNC_BATCH_LIMIT_MIN, SYNC_BATCH_LIMIT_MAX);
     let mut summary = SyncSummaryDto {
         processed: 0,
         failed: 0,
@@ -1331,9 +1337,10 @@ fn resolve_cli_candidates(
     }
     let custom = settings.cli_bin_override.trim();
     if harness == "auto" && custom.is_empty() {
-        let candidates: Vec<(String, PathBuf)> = AUTO_CLI_ORDER
-            .into_iter()
+        let candidates: Vec<(String, PathBuf)> = cli_engine_order()
+            .iter()
             .filter_map(|candidate| {
+                let candidate = candidate.as_str();
                 let bin_name =
                     crate::env::cli_binary_name_for_harness(candidate).unwrap_or(candidate);
                 resolve_cli_binary(bin_name, "", hydrated_path)
@@ -1360,7 +1367,8 @@ fn resolve_target_cli(settings: &AppSettings, hydrated_path: &OsStr) -> Result<(
     }
     let custom = settings.cli_bin_override.trim();
     if harness == "auto" {
-        for candidate in AUTO_CLI_ORDER {
+        for candidate in cli_engine_order() {
+            let candidate = candidate.as_str();
             let bin_name = crate::env::cli_binary_name_for_harness(candidate).unwrap_or(candidate);
             if let Some(found) = resolve_cli_binary(bin_name, custom, hydrated_path) {
                 return Ok((candidate.to_string(), found));
@@ -1417,82 +1425,35 @@ async fn run_command_output(mut cmd: Command) -> Result<std::process::Output> {
         .map_err(|err| PlanarError::External(format!("failed executing CLI process: {err}")))
 }
 
-struct OpenAiCompatSpec {
-    default_base: &'static str,
-    default_model: &'static str,
-    env_vars: &'static [&'static str],
-    allow_keyless: bool,
-}
-
-fn openai_compat_spec(provider: &str) -> Option<OpenAiCompatSpec> {
-    match provider {
-        "openai" => Some(OpenAiCompatSpec {
-            default_base: "https://api.openai.com/v1",
-            default_model: "gpt-4o-mini",
-            env_vars: &["OPENAI_API_KEY"],
-            allow_keyless: false,
-        }),
-        "deepseek" => Some(OpenAiCompatSpec {
-            default_base: "https://api.deepseek.com/v1",
-            default_model: "deepseek-chat",
-            env_vars: &["DEEPSEEK_API_KEY"],
-            allow_keyless: false,
-        }),
-        "openrouter" => Some(OpenAiCompatSpec {
-            default_base: "https://openrouter.ai/api/v1",
-            default_model: "google/gemini-2.5-flash-lite",
-            env_vars: &["OPENROUTER_API_KEY"],
-            allow_keyless: false,
-        }),
-        "xai" => Some(OpenAiCompatSpec {
-            default_base: "https://api.x.ai/v1",
-            default_model: "grok-3-mini",
-            env_vars: &["XAI_API_KEY"],
-            allow_keyless: false,
-        }),
-        "groq" => Some(OpenAiCompatSpec {
-            default_base: "https://api.groq.com/openai/v1",
-            default_model: "llama-3.3-70b-versatile",
-            env_vars: &["GROQ_API_KEY"],
-            allow_keyless: false,
-        }),
-        "mistral" => Some(OpenAiCompatSpec {
-            default_base: "https://api.mistral.ai/v1",
-            default_model: "ministral-8b-latest",
-            env_vars: &["MISTRAL_API_KEY"],
-            allow_keyless: false,
-        }),
-        "siliconflow" => Some(OpenAiCompatSpec {
-            default_base: "https://api.siliconflow.cn/v1",
-            default_model: "Qwen/Qwen2.5-7B-Instruct",
-            env_vars: &["SILICONFLOW_API_KEY"],
-            allow_keyless: false,
-        }),
-        "moonshot" => Some(OpenAiCompatSpec {
-            default_base: "https://api.moonshot.cn/v1",
-            default_model: "moonshot-v1-8k",
-            env_vars: &["MOONSHOT_API_KEY"],
-            allow_keyless: false,
-        }),
-        "ollama" => Some(OpenAiCompatSpec {
-            default_base: "http://127.0.0.1:11434/v1",
-            default_model: "qwen2.5:7b",
-            env_vars: &["OLLAMA_API_KEY"],
-            allow_keyless: true,
-        }),
-        "openai-compatible" => Some(OpenAiCompatSpec {
-            default_base: "",
-            default_model: "gpt-4o-mini",
-            env_vars: &["OPENAI_API_KEY"],
-            allow_keyless: false,
-        }),
-        _ => None,
-    }
+fn resolve_api_endpoint<'a>(
+    provider: &str,
+    settings: &'a AppSettings,
+) -> Result<(&'a str, &'a str)> {
+    let spec = api_provider(provider).ok_or_else(|| {
+        PlanarError::InvalidInput(format!("unsupported API provider `{provider}`"))
+    })?;
+    let base = if settings.api_base_url.trim().is_empty() {
+        if spec.requires_base_url || spec.default_base.trim().is_empty() {
+            return Err(PlanarError::InvalidInput(format!(
+                "API Base URL is required for `{provider}` provider"
+            )));
+        }
+        spec.default_base.trim_end_matches('/')
+    } else {
+        settings.api_base_url.trim().trim_end_matches('/')
+    };
+    let model = if settings.api_model.trim().is_empty() {
+        spec.default_model.as_str()
+    } else {
+        settings.api_model.trim()
+    };
+    Ok((base, model))
 }
 
 async fn run_api_prompt(prompt: &str, settings: &AppSettings) -> Result<(String, String)> {
     let provider = settings.api_provider.trim().to_ascii_lowercase();
     let api_key = resolve_api_key(&provider, settings)?;
+    let (base, model) = resolve_api_endpoint(&provider, settings)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(API_TIMEOUT_SECS))
         .build()
@@ -1500,16 +1461,9 @@ async fn run_api_prompt(prompt: &str, settings: &AppSettings) -> Result<(String,
 
     let backend_label = format!("api:{provider}");
     let reply = match provider.as_str() {
-        "gemini" => call_gemini_api(&client, settings, &api_key, prompt).await?,
-        "anthropic" => call_anthropic_api(&client, settings, &api_key, prompt).await?,
-        other if openai_compat_spec(other).is_some() => {
-            call_openai_compat_api(&client, other, settings, &api_key, prompt).await?
-        }
-        other => {
-            return Err(PlanarError::InvalidInput(format!(
-                "unsupported API provider `{other}`"
-            )));
-        }
+        "gemini" => call_gemini_api(&client, base, model, &api_key, prompt).await?,
+        "anthropic" => call_anthropic_api(&client, base, model, &api_key, prompt).await?,
+        other => call_openai_compat_api(&client, other, base, model, &api_key, prompt).await?,
     };
 
     Ok((reply, backend_label))
@@ -1521,22 +1475,17 @@ fn resolve_api_key(provider: &str, settings: &AppSettings) -> Result<String> {
         return Ok(trimmed.to_string());
     }
 
-    let compat = openai_compat_spec(provider);
-    let env_vars: &[&str] = match provider {
-        "gemini" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-        "anthropic" => &["ANTHROPIC_API_KEY"],
-        _ => compat.as_ref().map_or(&[][..], |s| s.env_vars),
-    };
-    for var in env_vars {
-        if let Ok(val) = std::env::var(var)
-            && !val.trim().is_empty()
-        {
-            return Ok(val.trim().to_string());
+    if let Some(spec) = api_provider(provider) {
+        for var in &spec.env_vars {
+            if let Ok(val) = std::env::var(var)
+                && !val.trim().is_empty()
+            {
+                return Ok(val.trim().to_string());
+            }
         }
-    }
-
-    if compat.as_ref().is_some_and(|s| s.allow_keyless) {
-        return Ok(String::new());
+        if spec.allow_keyless {
+            return Ok(String::new());
+        }
     }
 
     let base_lower = settings.api_base_url.to_ascii_lowercase();
@@ -1553,20 +1502,11 @@ fn resolve_api_key(provider: &str, settings: &AppSettings) -> Result<String> {
 
 async fn call_gemini_api(
     client: &reqwest::Client,
-    settings: &AppSettings,
+    base: &str,
+    model: &str,
     api_key: &str,
     prompt: &str,
 ) -> Result<String> {
-    let base = if settings.api_base_url.trim().is_empty() {
-        "https://generativelanguage.googleapis.com/v1beta"
-    } else {
-        settings.api_base_url.trim().trim_end_matches('/')
-    };
-    let model = if settings.api_model.trim().is_empty() {
-        "gemini-2.5-flash-lite"
-    } else {
-        settings.api_model.trim()
-    };
     let url = format!("{base}/models/{model}:generateContent?key={api_key}");
     let body = json!({
         "contents": [{ "role": "user", "parts": [{ "text": prompt }] }],
@@ -1602,20 +1542,11 @@ async fn call_gemini_api(
 
 async fn call_anthropic_api(
     client: &reqwest::Client,
-    settings: &AppSettings,
+    base: &str,
+    model: &str,
     api_key: &str,
     prompt: &str,
 ) -> Result<String> {
-    let base = if settings.api_base_url.trim().is_empty() {
-        "https://api.anthropic.com/v1"
-    } else {
-        settings.api_base_url.trim().trim_end_matches('/')
-    };
-    let model = if settings.api_model.trim().is_empty() {
-        "claude-3-5-haiku-latest"
-    } else {
-        settings.api_model.trim()
-    };
     let url = format!("{base}/messages");
     let body = json!({
         "model": model,
@@ -1655,31 +1586,11 @@ async fn call_anthropic_api(
 async fn call_openai_compat_api(
     client: &reqwest::Client,
     provider: &str,
-    settings: &AppSettings,
+    base: &str,
+    model: &str,
     api_key: &str,
     prompt: &str,
 ) -> Result<String> {
-    let spec = openai_compat_spec(provider).ok_or_else(|| {
-        PlanarError::InvalidInput(format!(
-            "unsupported OpenAI-compatible provider `{provider}`"
-        ))
-    })?;
-    let base = if settings.api_base_url.trim().is_empty() {
-        if spec.default_base.is_empty() {
-            return Err(PlanarError::InvalidInput(
-                "API Base URL is required for `openai-compatible` provider".into(),
-            ));
-        }
-        spec.default_base
-    } else {
-        settings.api_base_url.trim().trim_end_matches('/')
-    };
-    let model = if settings.api_model.trim().is_empty() {
-        spec.default_model
-    } else {
-        settings.api_model.trim()
-    };
-
     let url = format!("{base}/chat/completions");
     let body = json!({
         "model": model,
@@ -2281,7 +2192,10 @@ mod tests {
 
     #[test]
     fn auto_cli_order_places_claude_last_and_default_requires_explicit_setup() {
-        assert_eq!(AUTO_CLI_ORDER.last(), Some(&"claude"));
+        assert_eq!(
+            cli_engine_order().last().map(String::as_str),
+            Some("claude")
+        );
         let defaults = AppSettings::default();
         assert!(!defaults.is_processor_configured());
         assert_eq!(defaults.cli_harness, "");
@@ -2299,10 +2213,28 @@ mod tests {
             resolve_api_key("ollama", &ollama_settings).unwrap(),
             String::new()
         );
-        assert!(openai_compat_spec("openrouter").is_some());
-        assert!(openai_compat_spec("xai").is_some());
-        assert!(openai_compat_spec("groq").is_some());
-        assert!(openai_compat_spec("siliconflow").is_some());
+        assert!(api_provider("openrouter").is_some());
+        assert!(api_provider("xai").is_some());
+        assert!(api_provider("groq").is_some());
+        assert!(api_provider("siliconflow").is_some());
+        assert!(api_provider("openai-compatible").unwrap().requires_base_url);
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_requires_explicit_base_url() {
+        let settings = AppSettings {
+            processor_configured: true,
+            processor_mode: "api".to_string(),
+            api_provider: "openai-compatible".to_string(),
+            api_base_url: String::new(),
+            api_key: "test-key".to_string(),
+            ..AppSettings::default()
+        };
+        let err = run_api_prompt("ping", &settings).await.unwrap_err();
+        assert!(
+            err.to_string().contains("API Base URL is required"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
