@@ -450,12 +450,18 @@ async fn cmd_sync(db_path: PathBuf, roots: HarnessRoots, args: SyncCmdArgs) -> R
             SyncStreamEvent::Start {
                 total,
                 total_batches,
+                concurrency,
                 backend,
                 ..
             } => {
                 if !args.json && total > 0 {
+                    let par_note = if concurrency > 1 && total_batches > 1 {
+                        format!(" ({concurrency}× parallel)")
+                    } else {
+                        String::new()
+                    };
                     eprintln!(
-                        "Syncing {total} session(s) in {total_batches} batch(es) via {backend}..."
+                        "Syncing {total} session(s) in {total_batches} batch(es){par_note} via {backend}..."
                     );
                 }
             }

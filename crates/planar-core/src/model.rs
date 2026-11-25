@@ -49,10 +49,6 @@ impl Default for HarnessPathOverrides {
     }
 }
 
-const fn default_true() -> bool {
-    true
-}
-
 /// User settings persisted in SQLite and shared with `./ui`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", from = "AppSettingsWire")]
@@ -81,6 +77,7 @@ pub struct AppSettings {
     pub api_model: String,
     pub api_key: String,
     pub sync_batch_limit: usize,
+    pub sync_concurrency: usize,
     pub enabled_harnesses: EnabledHarnesses,
     pub harness_paths: HarnessPathOverrides,
 }
@@ -112,6 +109,7 @@ struct AppSettingsWire {
     api_model: Option<String>,
     api_key: String,
     sync_batch_limit: usize,
+    sync_concurrency: usize,
     enabled_harnesses: EnabledHarnesses,
     harness_paths: HarnessPathOverrides,
 }
@@ -144,6 +142,7 @@ impl Default for AppSettingsWire {
             api_model: None,
             api_key: defaults.api_key,
             sync_batch_limit: defaults.sync_batch_limit,
+            sync_concurrency: defaults.sync_concurrency,
             enabled_harnesses: defaults.enabled_harnesses,
             harness_paths: defaults.harness_paths,
         }
@@ -180,6 +179,7 @@ impl From<AppSettingsWire> for AppSettings {
             api_model,
             api_key: wire.api_key,
             sync_batch_limit: wire.sync_batch_limit,
+            sync_concurrency: wire.sync_concurrency,
             enabled_harnesses: wire.enabled_harnesses,
             harness_paths: wire.harness_paths,
         }
@@ -425,7 +425,8 @@ pub struct SyncBatchDoneDto {
     pub batch_usage: Option<SyncUsageDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cumulative_usage: Option<SyncUsageDto>,
-    pub plane: PlaneResponse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane: Option<PlaneResponse>,
 }
 
 /// NDJSON event streamed by `POST /api/sync/stream` for real-time batch widget updates.
@@ -437,6 +438,8 @@ pub enum SyncStreamEvent {
         total: usize,
         total_batches: usize,
         batch_size: usize,
+        #[serde(default)]
+        concurrency: usize,
         backend: String,
     },
     #[serde(rename_all = "camelCase")]
@@ -489,8 +492,8 @@ pub struct SessionDto {
     pub archived: bool,
     pub cwd: Option<String>,
     pub source_path: String,
-    #[serde(default = "default_true")]
-    pub source_exists: bool,
+    #[serde(default)]
+    pub source_exists: Option<bool>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -533,8 +536,8 @@ pub struct UnsummarizedDto {
     pub archived: bool,
     pub cwd: Option<String>,
     pub source_path: String,
-    #[serde(default = "default_true")]
-    pub source_exists: bool,
+    #[serde(default)]
+    pub source_exists: Option<bool>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -598,6 +601,25 @@ pub struct PlaneResponse {
     pub short_sessions: ShortSessionsDto,
     pub contributions: Vec<ContributionDayDto>,
     pub harnesses: Vec<HarnessStatusDto>,
+    pub last_sync: Option<SyncSummaryDto>,
+}
+
+/// Lightweight state payload returned by `GET /api/plane?lite=1` during streaming `Sync` refreshes,
+/// omitting the expensive 20-week contribution heatmap and CLI `$PATH` probe so `./ui` keeps its
+/// previously loaded `contributions` and `harnesses` untouched until `Complete`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LitePlaneResponse {
+    pub is_lite: bool,
+    pub days: Vec<DayMeta>,
+    pub anchor_date: String,
+    pub now_hour: f64,
+    pub tz_label: String,
+    pub archived_count: usize,
+    pub settings: AppSettings,
+    pub lines: Vec<LineDto>,
+    pub unsummarized: Vec<UnsummarizedDto>,
+    pub short_sessions: ShortSessionsDto,
     pub last_sync: Option<SyncSummaryDto>,
 }
 

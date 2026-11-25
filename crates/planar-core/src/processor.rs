@@ -1,24 +1,34 @@
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chrono::Local;
+use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
-use crate::db::{LineCatalogEntry, SyncCandidate, SyncScope, UnpinnedClusterItem};
+use crate::db::{
+    LineCatalogEntry, SessionDigestWrite, SyncCandidate, SyncScope, UnpinnedClusterItem,
+};
 use crate::defaults::{
-    API_TIMEOUT_SECS, CLI_TIMEOUT_SECS, FEWEST_USER_INPUTS_MIN, MAX_BATCH_PROMPT_CHARS,
-    SLICER_CHAR_BUDGET_MIN, STREAM_HEARTBEAT_SECS, SYNC_BATCH_LIMIT_MAX, SYNC_BATCH_LIMIT_MIN,
-    WINDOW_DAYS_MAX, WINDOW_DAYS_MIN, api_provider, cli_engine_order,
+    API_RETRY_BASE_DELAY_MS, API_RETRY_MAX_DELAY_MS, API_TIMEOUT_SECS, API_TRANSIENT_MAX_RETRIES,
+    CLI_TIMEOUT_SECS, FEWEST_USER_INPUTS_MIN, MAX_BATCH_PROMPT_CHARS, SLICER_CHAR_BUDGET_MIN,
+    STREAM_HEARTBEAT_SECS, SYNC_BATCH_LIMIT_MAX, SYNC_BATCH_LIMIT_MIN, SYNC_CLI_CONCURRENCY_CAP,
+    SYNC_CONCURRENCY_MAX, SYNC_CONCURRENCY_MIN, WINDOW_DAYS_MAX, WINDOW_DAYS_MIN, api_provider,
+    cli_engine_order,
 };
 use crate::env::resolve_cli_binary;
 use crate::error::{PlanarError, Result};
@@ -36,6 +46,29 @@ use crate::pricing::{canonical_billing_provider, estimate_api_cost_usd};
 use crate::server::AppState;
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
+static RETRY_JITTER_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// Constructs the shared `reqwest::Client` held on `AppState` so concurrent `Sync` requests
+/// reuse TLS sessions and HTTP/2 connection pools while preserving `API_TIMEOUT_SECS`.
+pub(crate) fn build_shared_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(API_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// Resolves the effective concurrent batch count for `settings`: `1..=16` in direct API mode
+/// (default `4`), and capped at `SYNC_CLI_CONCURRENCY_CAP` (`2`) in local CLI subprocess mode.
+pub(crate) fn effective_sync_concurrency(settings: &AppSettings) -> usize {
+    let configured = settings
+        .sync_concurrency
+        .clamp(SYNC_CONCURRENCY_MIN, SYNC_CONCURRENCY_MAX);
+    if settings.processor_mode == "api" {
+        configured
+    } else {
+        configured.min(SYNC_CLI_CONCURRENCY_CAP)
+    }
+}
 
 /// Single dialogue turn extracted cleanly for Head–Middle–Tail trajectory slicing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,10 +136,7 @@ pub fn slice_trajectory_file(
         .max(SLICER_CHAR_BUDGET_MIN);
 
     stream_jsonl_lines(source_path, 0, |line| {
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
-            return Ok(());
-        };
-        let Some((role, text)) = extract_step_text(harness, &val) else {
+        let Some((role, text)) = extract_step_text_fast(harness, line) else {
             return Ok(());
         };
         if text.contains(INTERNAL_DIGEST_SENTINEL) {
@@ -325,9 +355,19 @@ pub async fn test_processor_connection(
     settings: &AppSettings,
     hydrated_path: &OsStr,
 ) -> Result<ProcessorTestResult> {
+    let client = build_shared_http_client();
+    test_processor_connection_with_client(settings, hydrated_path, &client).await
+}
+
+/// Tests connectivity and round-trip latency reusing a shared `reqwest::Client`.
+pub async fn test_processor_connection_with_client(
+    settings: &AppSettings,
+    hydrated_path: &OsStr,
+    http_client: &reqwest::Client,
+) -> Result<ProcessorTestResult> {
     let started = Instant::now();
     let ping_prompt = "Respond with strictly valid JSON matching this schema and nothing else: {\"ok\": true, \"pong\": \"planar\"}";
-    let output = match run_llm_prompt(ping_prompt, settings, hydrated_path).await {
+    let output = match run_llm_prompt(ping_prompt, settings, hydrated_path, http_client).await {
         Ok(res) => res,
         Err(err) => {
             return Ok(ProcessorTestResult {
@@ -381,8 +421,10 @@ struct PreparedSession {
     approx_chars: usize,
 }
 
-struct BatchRunResult {
-    filed: Vec<SyncFiledPreview>,
+struct BatchLlmResult {
+    batch_index: usize,
+    batch_len: usize,
+    digests: Vec<(SyncCandidate, GeneratedDigest)>,
     failed: usize,
     backend_used: Option<String>,
     usage: Option<SyncUsageDto>,
@@ -425,6 +467,40 @@ fn estimate_sliced_chars(sliced: &SlicedTrajectory) -> usize {
         .saturating_add(sum_steps(&sliced.middle_users))
         .saturating_add(sum_steps(&sliced.tail))
         .saturating_add(240)
+}
+
+fn normalize_cwd_key(cwd: Option<&str>) -> String {
+    let Some(raw) = cwd.map(str::trim).filter(|s| !s.is_empty()) else {
+        return String::new();
+    };
+    let trimmed = raw.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        raw.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Groups prepared candidates by normalized `cwd` affinity while preserving first-seen workspace
+/// priority and relative recency within each workspace, so same-project sessions pack into the
+/// same batch while distinct projects run concurrently with minimal cross-batch Line fragmentation.
+fn order_prepared_by_cwd_affinity(items: Vec<PreparedSession>) -> Vec<PreparedSession> {
+    if items.len() <= 1 {
+        return items;
+    }
+    let mut group_idx: HashMap<String, usize> = HashMap::new();
+    let mut groups: Vec<Vec<PreparedSession>> = Vec::new();
+    for item in items {
+        let key = normalize_cwd_key(item.cand.cwd.as_deref());
+        if let Some(&idx) = group_idx.get(&key) {
+            groups[idx].push(item);
+        } else {
+            let idx = groups.len();
+            group_idx.insert(key, idx);
+            groups.push(vec![item]);
+        }
+    }
+    groups.into_iter().flatten().collect()
 }
 
 fn chunk_prepared_into_batches(
@@ -482,6 +558,88 @@ async fn apply_digest_to_store(
         .await
 }
 
+async fn commit_batch_digests(
+    state: &AppState,
+    digests: Vec<(SyncCandidate, GeneratedDigest)>,
+    slice_hash: &str,
+) -> (Vec<SyncFiledPreview>, usize, Option<String>) {
+    if digests.is_empty() {
+        return (Vec::new(), 0, None);
+    }
+    let count = digests.len();
+    let mut writes = Vec::with_capacity(count);
+    let mut previews = Vec::with_capacity(count);
+    for (cand, digest) in digests {
+        previews.push(SyncFiledPreview {
+            session_id: cand.id.clone(),
+            title: digest.title.clone(),
+            line_name: digest.suggested_line.clone(),
+        });
+        writes.push(SessionDigestWrite {
+            session_id: cand.id,
+            step_count: cand.step_count,
+            slice_hash: slice_hash.to_string(),
+            title: digest.title,
+            stopped_at: digest.stopped_at,
+            left_open: digest.left_open,
+            suggested_line: digest.suggested_line,
+            is_one_off: digest.is_one_off,
+        });
+    }
+    match state
+        .with_store(move |store| store.apply_session_digests_batch(&writes))
+        .await
+    {
+        Ok(()) => (previews, 0, None),
+        Err(err) => (Vec::new(), count, Some(err.to_string())),
+    }
+}
+
+/// Fans out `slice_trajectory_file` across a bounded multi-core Tokio blocking pool while
+/// preserving the exact input candidate order.
+async fn slice_candidates_parallel(
+    to_slice: Vec<SyncCandidate>,
+    settings: &AppSettings,
+) -> Result<Vec<(SyncCandidate, Result<SlicedTrajectory>)>> {
+    if to_slice.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let max_workers = std::thread::available_parallelism()
+        .map_or(4, NonZeroUsize::get)
+        .min(to_slice.len())
+        .max(1);
+    let sem = Arc::new(Semaphore::new(max_workers));
+    let shared_settings = Arc::new(settings.clone());
+    let total = to_slice.len();
+    let mut join_set: JoinSet<(usize, SyncCandidate, Result<SlicedTrajectory>)> = JoinSet::new();
+
+    for (idx, cand) in to_slice.into_iter().enumerate() {
+        let permit = sem
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|err| PlanarError::TaskJoin(err.to_string()))?;
+        let cfg = shared_settings.clone();
+        join_set.spawn_blocking(move || {
+            let _permit = permit;
+            let res = slice_trajectory_file(Path::new(&cand.source_path), &cand.harness, &cfg);
+            (idx, cand, res)
+        });
+    }
+
+    let mut ordered: Vec<Option<(SyncCandidate, Result<SlicedTrajectory>)>> =
+        (0..total).map(|_| None).collect();
+    while let Some(joined) = join_set.join_next().await {
+        let (idx, cand, res) = joined.map_err(|err| PlanarError::TaskJoin(err.to_string()))?;
+        if let Some(slot) = ordered.get_mut(idx) {
+            *slot = Some((cand, res));
+        }
+    }
+
+    Ok(ordered.into_iter().flatten().collect())
+}
+
 /// Prepares candidates locally (handling pruned logs and reconciling post-filter short sessions)
 /// and returns `(pruned_filed, skipped_short, slice_failures, last_err, prepared_for_llm)`.
 async fn prepare_candidates_for_batching(
@@ -529,20 +687,7 @@ async fn prepare_candidates_for_batching(
         return (pruned_filed, skipped_short, failed, last_err, Vec::new());
     }
 
-    let cfg_clone = settings.clone();
-    let sliced_results = tokio::task::spawn_blocking(move || {
-        to_slice
-            .into_iter()
-            .map(|cand| {
-                let res =
-                    slice_trajectory_file(Path::new(&cand.source_path), &cand.harness, &cfg_clone);
-                (cand, res)
-            })
-            .collect::<Vec<_>>()
-    })
-    .await;
-
-    let Ok(pairs) = sliced_results else {
+    let Ok(pairs) = slice_candidates_parallel(to_slice, settings).await else {
         return (
             pruned_filed,
             skipped_short,
@@ -590,17 +735,76 @@ async fn prepare_candidates_for_batching(
     (pruned_filed, skipped_short, failed, last_err, prepared)
 }
 
-/// Executes a single multi-session LLM call for `batch` (e.g. 4 sessions at once) and commits digests.
-async fn execute_prepared_batch(
+fn augment_catalog_with_batch_digests(
+    base: &[LineCatalogEntry],
+    digests: &[(SyncCandidate, GeneratedDigest)],
+) -> Vec<LineCatalogEntry> {
+    let mut out = base.to_vec();
+    let mut seen: HashSet<String> = out.iter().map(|e| e.name.to_ascii_lowercase()).collect();
+    for (_, digest) in digests {
+        if digest.is_one_off {
+            continue;
+        }
+        let trimmed = digest.suggested_line.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("one-off") {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if seen.insert(lower) {
+            out.push(LineCatalogEntry {
+                id: String::new(),
+                name: trimmed.to_string(),
+                description: String::new(),
+                pinned: false,
+                session_count: 1,
+            });
+        }
+    }
+    out
+}
+
+fn spawn_in_join_set<T, F>(set: &mut JoinSet<T>, fut: F)
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    #[cfg(test)]
+    {
+        let billing = TEST_BILLING_PROVIDER_OVERRIDE
+            .try_with(|v| *v)
+            .ok()
+            .flatten();
+        let retry_ms = TEST_RETRY_BASE_DELAY_MS_OVERRIDE
+            .try_with(|v| *v)
+            .ok()
+            .flatten();
+        set.spawn(TEST_BILLING_PROVIDER_OVERRIDE.scope(
+            billing,
+            TEST_RETRY_BASE_DELAY_MS_OVERRIDE.scope(retry_ms, fut),
+        ));
+    }
+    #[cfg(not(test))]
+    {
+        set.spawn(fut);
+    }
+}
+
+/// Executes a single multi-session LLM call for `batch` (plus parallel omitted-item fallbacks)
+/// bounded by `llm_sem`, returning parsed digests ready for coordinator SQLite commit.
+async fn execute_prepared_batch_llm(
     state: &AppState,
-    batch: &[PreparedSession],
+    batch_index: usize,
+    batch: Vec<PreparedSession>,
     settings: &AppSettings,
-    slice_hash: &str,
-) -> BatchRunResult {
+    llm_sem: Arc<Semaphore>,
+) -> BatchLlmResult {
+    let batch_len = batch.len();
     if !settings.is_processor_configured() {
-        return BatchRunResult {
-            filed: Vec::new(),
-            failed: batch.len(),
+        return BatchLlmResult {
+            batch_index,
+            batch_len,
+            digests: Vec::new(),
+            failed: batch_len,
             backend_used: None,
             usage: None,
             last_error: Some(unconfigured_processor_message(settings)),
@@ -611,9 +815,11 @@ async fn execute_prepared_batch(
     let catalog = match state.with_store(|store| store.list_line_catalog()).await {
         Ok(c) => c,
         Err(err) => {
-            return BatchRunResult {
-                filed: Vec::new(),
-                failed: batch.len(),
+            return BatchLlmResult {
+                batch_index,
+                batch_len,
+                digests: Vec::new(),
+                failed: batch_len,
                 backend_used: None,
                 usage: None,
                 last_error: Some(err.to_string()),
@@ -625,16 +831,34 @@ async fn execute_prepared_batch(
     let prompt = if batch.len() == 1 {
         build_digest_prompt(&batch[0].cand, &batch[0].sliced, &catalog, settings)
     } else {
-        build_batch_digest_prompt(batch, &catalog, settings)
+        build_batch_digest_prompt(&batch, &catalog, settings)
     };
 
-    let main_out = match run_llm_prompt(&prompt, settings, &state.hydrated_path).await {
+    let main_out = {
+        let Ok(_permit) = llm_sem.acquire().await else {
+            return BatchLlmResult {
+                batch_index,
+                batch_len,
+                digests: Vec::new(),
+                failed: batch_len,
+                backend_used: None,
+                usage: None,
+                last_error: Some("sync concurrency semaphore closed".into()),
+                fatal: false,
+            };
+        };
+        run_llm_prompt(&prompt, settings, &state.hydrated_path, &state.http_client).await
+    };
+
+    let main_out = match main_out {
         Ok(res) => res,
         Err(err) => {
             let fatal = is_fatal_processor_error(&err);
-            return BatchRunResult {
-                filed: Vec::new(),
-                failed: batch.len(),
+            return BatchLlmResult {
+                batch_index,
+                batch_len,
+                digests: Vec::new(),
+                failed: batch_len,
                 backend_used: None,
                 usage: None,
                 last_error: Some(err.to_string()),
@@ -650,9 +874,11 @@ async fn execute_prepared_batch(
         Ok(text) => text,
         Err(err) => {
             let fatal = is_fatal_processor_error(&err);
-            return BatchRunResult {
-                filed: Vec::new(),
-                failed: batch.len(),
+            return BatchLlmResult {
+                batch_index,
+                batch_len,
+                digests: Vec::new(),
+                failed: batch_len,
                 backend_used: Some(backend_used),
                 usage: Some(batch_usage),
                 last_error: Some(err.to_string()),
@@ -665,9 +891,11 @@ async fn execute_prepared_batch(
     let mut parsed_map = match parse_batch_digest_json(&main_reply, &expected_ids) {
         Ok(m) => m,
         Err(err) => {
-            return BatchRunResult {
-                filed: Vec::new(),
-                failed: batch.len(),
+            return BatchLlmResult {
+                batch_index,
+                batch_len,
+                digests: Vec::new(),
+                failed: batch_len,
                 backend_used: Some(backend_used),
                 usage: Some(batch_usage),
                 last_error: Some(err.to_string()),
@@ -676,77 +904,80 @@ async fn execute_prepared_batch(
         }
     };
 
-    let mut filed = Vec::new();
+    let mut digests = Vec::with_capacity(batch_len);
     let mut failed = 0_usize;
     let mut last_error = None;
-    let mut omitted: Vec<&PreparedSession> = Vec::new();
+    let mut omitted: Vec<PreparedSession> = Vec::new();
 
     for item in batch {
         if let Some(digest) = parsed_map.remove(&item.cand.id) {
-            match apply_digest_to_store(state, &item.cand, slice_hash, &digest).await {
-                Ok(()) => {
-                    filed.push(SyncFiledPreview {
-                        session_id: item.cand.id.clone(),
-                        title: digest.title,
-                        line_name: digest.suggested_line,
-                    });
-                }
-                Err(err) => {
-                    failed += 1;
-                    last_error = Some(err.to_string());
-                }
-            }
+            digests.push((item.cand, digest));
         } else {
             omitted.push(item);
         }
     }
 
-    // If the batch call omitted any session ID, fall back once per omitted item so no work is dropped.
+    // If the batch call omitted any session ID, fall back concurrently per omitted item so no work is dropped.
     if !omitted.is_empty() {
-        let refreshed_catalog = state
-            .with_store(|store| store.list_line_catalog())
-            .await
-            .unwrap_or(catalog);
+        let augmented_catalog = augment_catalog_with_batch_digests(&catalog, &digests);
+        let mut solo_set: JoinSet<(SyncCandidate, Option<SyncUsageDto>, Result<GeneratedDigest>)> =
+            JoinSet::new();
+
         for item in omitted {
             let solo_prompt =
-                build_digest_prompt(&item.cand, &item.sliced, &refreshed_catalog, settings);
-            match run_llm_prompt(&solo_prompt, settings, &state.hydrated_path).await {
-                Ok(solo_out) => {
-                    batch_usage.merge_from(&solo_out.usage);
-                    match solo_out.reply.and_then(|reply| parse_digest_json(&reply)) {
-                        Ok(digest) => {
-                            match apply_digest_to_store(state, &item.cand, slice_hash, &digest)
-                                .await
-                            {
-                                Ok(()) => {
-                                    filed.push(SyncFiledPreview {
-                                        session_id: item.cand.id.clone(),
-                                        title: digest.title,
-                                        line_name: digest.suggested_line,
-                                    });
-                                }
-                                Err(err) => {
-                                    failed += 1;
-                                    last_error = Some(err.to_string());
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            failed += 1;
-                            last_error = Some(err.to_string());
-                        }
+                build_digest_prompt(&item.cand, &item.sliced, &augmented_catalog, settings);
+            let cfg = settings.clone();
+            let hydrated = state.hydrated_path.clone();
+            let client = state.http_client.clone();
+            let sem = llm_sem.clone();
+            let cand = item.cand;
+            spawn_in_join_set(&mut solo_set, async move {
+                let Ok(_permit) = sem.acquire_owned().await else {
+                    return (
+                        cand,
+                        None,
+                        Err(PlanarError::External(
+                            "sync concurrency semaphore closed".into(),
+                        )),
+                    );
+                };
+                match run_llm_prompt(&solo_prompt, &cfg, &hydrated, &client).await {
+                    Ok(solo_out) => {
+                        let parsed = solo_out.reply.and_then(|reply| parse_digest_json(&reply));
+                        (cand, Some(solo_out.usage), parsed)
                     }
+                    Err(err) => (cand, None, Err(err)),
                 }
-                Err(err) => {
+            });
+        }
+
+        while let Some(joined) = solo_set.join_next().await {
+            match joined {
+                Ok((cand, usage_opt, Ok(digest))) => {
+                    if let Some(u) = usage_opt {
+                        batch_usage.merge_from(&u);
+                    }
+                    digests.push((cand, digest));
+                }
+                Ok((_, usage_opt, Err(err))) => {
+                    if let Some(u) = usage_opt {
+                        batch_usage.merge_from(&u);
+                    }
                     failed += 1;
                     last_error = Some(err.to_string());
+                }
+                Err(join_err) => {
+                    failed += 1;
+                    last_error = Some(join_err.to_string());
                 }
             }
         }
     }
 
-    BatchRunResult {
-        filed,
+    BatchLlmResult {
+        batch_index,
+        batch_len,
+        digests,
         failed,
         backend_used: Some(backend_used),
         usage: Some(batch_usage),
@@ -767,7 +998,7 @@ pub async fn sync_pending_sessions_in_scope(
     limit_override: Option<usize>,
     scope: Option<SyncScope>,
 ) -> Result<SyncSummaryDto> {
-    let (settings, slice_hash, candidates) = state
+    let (settings, slice_hash, candidates, catalog_is_empty) = state
         .with_store(move |store| {
             let settings = store.get_settings()?;
             let slice_hash = compute_slice_config_hash(&settings);
@@ -786,7 +1017,8 @@ pub async fn sync_pending_sessions_in_scope(
                 scope.as_ref(),
                 Local::now(),
             )?;
-            Ok((settings, slice_hash, candidates))
+            let catalog_is_empty = store.list_line_catalog()?.is_empty();
+            Ok((settings, slice_hash, candidates, catalog_is_empty))
         })
         .await?;
 
@@ -813,25 +1045,79 @@ pub async fn sync_pending_sessions_in_scope(
         summary.last_error = slice_err;
     }
 
+    let prepared = order_prepared_by_cwd_affinity(prepared);
     let batches = chunk_prepared_into_batches(prepared, settings.sync_batch_limit);
     let total_batches = batches.len();
-    for (idx, batch) in batches.iter().enumerate() {
-        let res = execute_prepared_batch(state, batch, &settings, &slice_hash).await;
-        if let Some(backend) = res.backend_used {
+    if total_batches == 0 {
+        return Ok(summary);
+    }
+
+    let total_batch_items: usize = batches.iter().map(Vec::len).sum();
+    let concurrency = effective_sync_concurrency(&settings);
+    let mut warming_up = catalog_is_empty && total_batches > 1 && concurrency > 1;
+    let llm_sem = Arc::new(Semaphore::new(concurrency));
+    let mut join_set: JoinSet<BatchLlmResult> = JoinSet::new();
+    let mut queue = batches.into_iter().enumerate().peekable();
+    let mut completed_items = 0_usize;
+
+    loop {
+        let active_limit = if warming_up { 1 } else { concurrency };
+        while join_set.len() < active_limit && queue.peek().is_some() {
+            let Some((idx, batch)) = queue.next() else {
+                break;
+            };
+            let st = state.clone();
+            let cfg = settings.clone();
+            let lsem = llm_sem.clone();
+            spawn_in_join_set(&mut join_set, async move {
+                execute_prepared_batch_llm(&st, idx + 1, batch, &cfg, lsem).await
+            });
+        }
+
+        let Some(joined) = join_set.join_next().await else {
+            break;
+        };
+
+        let batch_res = match joined {
+            Ok(res) => res,
+            Err(join_err) => BatchLlmResult {
+                batch_index: 0,
+                batch_len: 0,
+                digests: Vec::new(),
+                failed: 0,
+                backend_used: None,
+                usage: None,
+                last_error: Some(join_err.to_string()),
+                fatal: false,
+            },
+        };
+
+        let (filed, commit_failed, commit_err) =
+            commit_batch_digests(state, batch_res.digests, &slice_hash).await;
+        if let Some(backend) = batch_res.backend_used {
             summary.backend_used = backend;
         }
-        merge_opt_usage(&mut summary.usage, res.usage.as_ref());
-        summary.processed += res.filed.len();
-        summary.failed += res.failed;
-        if res.last_error.is_some() {
-            summary.last_error = res.last_error;
+        merge_opt_usage(&mut summary.usage, batch_res.usage.as_ref());
+        summary.processed += filed.len();
+        summary.failed += batch_res.failed.saturating_add(commit_failed);
+        let batch_err = commit_err.or(batch_res.last_error);
+        if batch_err.is_some() {
+            summary.last_error = batch_err;
         }
-        if res.fatal {
-            let remaining: usize = batches[idx + 1..].iter().map(Vec::len).sum();
-            summary.skipped += remaining;
-            let _ = total_batches;
+        completed_items = completed_items.saturating_add(batch_res.batch_len);
+
+        if warming_up {
+            warming_up = false;
+        }
+        if batch_res.fatal {
+            join_set.abort_all();
             break;
         }
+    }
+
+    let remaining = total_batch_items.saturating_sub(completed_items);
+    if remaining > 0 {
+        summary.skipped = summary.skipped.saturating_add(remaining);
     }
 
     Ok(summary)
@@ -881,47 +1167,58 @@ pub async fn estimate_sync_cost(
 
     let min_inputs = usize::try_from(settings.fewest_user_inputs.max(FEWEST_USER_INPUTS_MIN))
         .unwrap_or(usize::MAX);
-    let cfg_clone = settings.clone();
-    let prepared = tokio::task::spawn_blocking(move || {
-        let mut out = Vec::new();
-        for cand in existing {
-            let Ok(sliced) =
-                slice_trajectory_file(Path::new(&cand.source_path), &cand.harness, &cfg_clone)
-            else {
-                continue;
-            };
-            if sliced.user_count < min_inputs && cand.line_id.is_none() {
-                continue;
-            }
-            let approx_chars = estimate_sliced_chars(&sliced);
-            out.push(PreparedSession {
-                cand,
-                sliced,
-                approx_chars,
-            });
+    let pairs = slice_candidates_parallel(existing, &settings).await?;
+    let mut prepared = Vec::new();
+    for (cand, res) in pairs {
+        let Ok(sliced) = res else {
+            continue;
+        };
+        if sliced.user_count < min_inputs && cand.line_id.is_none() {
+            continue;
         }
-        out
-    })
-    .await
-    .map_err(|err| PlanarError::TaskJoin(err.to_string()))?;
+        let approx_chars = estimate_sliced_chars(&sliced);
+        prepared.push(PreparedSession {
+            cand,
+            sliced,
+            approx_chars,
+        });
+    }
 
+    let prepared = order_prepared_by_cwd_affinity(prepared);
     let batches = chunk_prepared_into_batches(prepared, settings.sync_batch_limit);
     Ok(estimate_prepared_batches_cost(
         &batches, &catalog, &settings,
     ))
 }
 
-/// Spawns a multi-session batch streaming `Sync` coordinator scoped to `scope`, emitting NDJSON
-/// events as each batch starts and completes while keeping the connection alive with heartbeats.
+/// Spawns a multi-session concurrent batch streaming `Sync` coordinator scoped to `scope`,
+/// emitting NDJSON events as batches start and complete while keeping the connection alive
+/// with heartbeats. Registers a drain handle on `state` for `POST /api/sync/stop`.
 pub fn spawn_sync_stream(
     state: AppState,
     scope: SyncScope,
     force_all: bool,
     limit_override: Option<usize>,
 ) -> tokio::sync::mpsc::Receiver<SyncStreamEvent> {
-    let (tx, rx) = tokio::sync::mpsc::channel(24);
+    let drain_flag = state
+        .prepare_sync_drain(None)
+        .unwrap_or_else(|_| Arc::new(AtomicBool::new(false)));
+    spawn_sync_stream_with_drain(state, scope, force_all, limit_override, drain_flag)
+}
+
+/// Spawns a streaming `Sync` coordinator controlled by an explicit `drain_flag`: setting
+/// `drain_flag` to `true` stops scheduling new batches while letting in-flight batches drain
+/// cleanly; dropping the returned receiver immediately aborts all in-flight tasks.
+pub fn spawn_sync_stream_with_drain(
+    state: AppState,
+    scope: SyncScope,
+    force_all: bool,
+    limit_override: Option<usize>,
+    drain_flag: Arc<AtomicBool>,
+) -> tokio::sync::mpsc::Receiver<SyncStreamEvent> {
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
     tokio::spawn(async move {
-        run_sync_stream_coordinator(state, scope, force_all, limit_override, tx).await;
+        run_sync_stream_coordinator(state, scope, force_all, limit_override, drain_flag, tx).await;
     });
     rx
 }
@@ -931,6 +1228,7 @@ async fn run_sync_stream_coordinator(
     scope: SyncScope,
     force_all: bool,
     limit_override: Option<usize>,
+    drain_flag: Arc<AtomicBool>,
     tx: tokio::sync::mpsc::Sender<SyncStreamEvent>,
 ) {
     let days = scope.days.clamp(WINDOW_DAYS_MIN, WINDOW_DAYS_MAX);
@@ -949,11 +1247,12 @@ async fn run_sync_stream_coordinator(
                 Some(&scope_for_query),
                 Local::now(),
             )?;
-            Ok((settings, slice_hash, candidates))
+            let catalog_is_empty = store.list_line_catalog()?.is_empty();
+            Ok((settings, slice_hash, candidates, catalog_is_empty))
         })
         .await;
 
-    let (settings, slice_hash, candidates) = match init_res {
+    let (settings, slice_hash, candidates, catalog_is_empty) = match init_res {
         Ok(tuple) => tuple,
         Err(err) => {
             let fallback_summary = SyncSummaryDto {
@@ -981,6 +1280,7 @@ async fn run_sync_stream_coordinator(
     let batch_size = settings
         .sync_batch_limit
         .clamp(SYNC_BATCH_LIMIT_MIN, SYNC_BATCH_LIMIT_MAX);
+    let concurrency = effective_sync_concurrency(&settings);
     let mut summary = SyncSummaryDto {
         processed: 0,
         failed: 0,
@@ -990,12 +1290,16 @@ async fn run_sync_stream_coordinator(
         usage: None,
     };
 
-    if candidates.is_empty() {
+    // Exit early when nothing is pending or Stop was requested before slicing began (e.g. during `run_scan`).
+    if candidates.is_empty() || drain_flag.load(Ordering::Acquire) {
+        let total = candidates.len();
+        summary.skipped = total;
         let _ = tx
             .send(SyncStreamEvent::Start {
-                total: 0,
+                total,
                 total_batches: 0,
                 batch_size,
+                concurrency,
                 backend: default_backend,
             })
             .await;
@@ -1020,6 +1324,7 @@ async fn run_sync_stream_coordinator(
         summary.last_error = slice_err;
     }
 
+    let prepared = order_prepared_by_cwd_affinity(prepared);
     let batches = chunk_prepared_into_batches(prepared, batch_size);
     let total_batches = batches.len();
     let total_items: usize = pruned_filed
@@ -1032,6 +1337,7 @@ async fn run_sync_stream_coordinator(
             total: total_items,
             total_batches,
             batch_size,
+            concurrency,
             backend: default_backend,
         })
         .await
@@ -1043,95 +1349,118 @@ async fn run_sync_stream_coordinator(
     let mut completed = pruned_filed.len().saturating_add(slice_failed);
     if !pruned_filed.is_empty() {
         state.record_last_sync(summary.clone());
-        if let Ok(plane) = state.build_plane_snapshot(days, anchor).await {
-            let ev = SyncStreamEvent::BatchDone(Box::new(SyncBatchDoneDto {
-                batch_index: 0,
-                total_batches,
-                batch_processed: pruned_filed.len(),
-                batch_failed: slice_failed,
-                filed: pruned_filed,
-                error: summary.last_error.clone(),
-                processed: summary.processed,
-                failed: summary.failed,
-                skipped: summary.skipped,
-                completed,
-                total: total_items,
-                backend_used: summary.backend_used.clone(),
-                batch_usage: None,
-                cumulative_usage: summary.usage.clone(),
-                plane,
-            }));
-            if tx.send(ev).await.is_err() {
-                return;
-            }
+        let ev = SyncStreamEvent::BatchDone(Box::new(SyncBatchDoneDto {
+            batch_index: 0,
+            total_batches,
+            batch_processed: pruned_filed.len(),
+            batch_failed: slice_failed,
+            filed: pruned_filed,
+            error: summary.last_error.clone(),
+            processed: summary.processed,
+            failed: summary.failed,
+            skipped: summary.skipped,
+            completed,
+            total: total_items,
+            backend_used: summary.backend_used.clone(),
+            batch_usage: None,
+            cumulative_usage: summary.usage.clone(),
+            plane: None,
+        }));
+        if tx.send(ev).await.is_err() {
+            return;
         }
     }
 
     let mut heartbeat = tokio::time::interval(Duration::from_secs(STREAM_HEARTBEAT_SECS));
     heartbeat.tick().await;
 
-    for (idx, batch) in batches.into_iter().enumerate() {
-        let batch_index = idx + 1;
-        let cur_batch_len = batch.len();
-        let preview_items: Vec<SyncBatchPreviewItem> = batch
-            .iter()
-            .map(|p| SyncBatchPreviewItem {
-                session_id: p.cand.id.clone(),
-                harness: p.cand.harness.clone(),
-                label: candidate_preview_label(&p.cand),
-            })
-            .collect();
+    let mut warming_up = catalog_is_empty && total_batches > 1 && concurrency > 1;
+    let llm_sem = Arc::new(Semaphore::new(concurrency));
+    let mut join_set: JoinSet<BatchLlmResult> = JoinSet::new();
+    let mut queue = batches.into_iter().enumerate().peekable();
+    let mut fatal_stopped = false;
 
-        if tx
-            .send(SyncStreamEvent::BatchStart {
-                batch_index,
-                total_batches,
-                batch_size: cur_batch_len,
-                items: preview_items,
-            })
-            .await
-            .is_err()
+    loop {
+        let active_limit = if warming_up { 1 } else { concurrency };
+        while !fatal_stopped
+            && !drain_flag.load(Ordering::Acquire)
+            && join_set.len() < active_limit
+            && queue.peek().is_some()
         {
-            return;
+            let Some((idx, batch)) = queue.next() else {
+                break;
+            };
+            let batch_index = idx + 1;
+            let cur_batch_len = batch.len();
+            let preview_items: Vec<SyncBatchPreviewItem> = batch
+                .iter()
+                .map(|p| SyncBatchPreviewItem {
+                    session_id: p.cand.id.clone(),
+                    harness: p.cand.harness.clone(),
+                    label: candidate_preview_label(&p.cand),
+                })
+                .collect();
+
+            if tx
+                .send(SyncStreamEvent::BatchStart {
+                    batch_index,
+                    total_batches,
+                    batch_size: cur_batch_len,
+                    items: preview_items,
+                })
+                .await
+                .is_err()
+            {
+                join_set.abort_all();
+                return;
+            }
+
+            let st = state.clone();
+            let cfg = settings.clone();
+            let lsem = llm_sem.clone();
+            spawn_in_join_set(&mut join_set, async move {
+                execute_prepared_batch_llm(&st, batch_index, batch, &cfg, lsem).await
+            });
         }
 
-        let st = state.clone();
-        let cfg = settings.clone();
-        let sh = slice_hash.clone();
-        let mut batch_handle =
-            tokio::spawn(async move { execute_prepared_batch(&st, &batch, &cfg, &sh).await });
+        if join_set.is_empty() {
+            break;
+        }
 
-        let batch_res = loop {
-            tokio::select! {
-                () = tx.closed() => {
-                    batch_handle.abort();
+        let finished = tokio::select! {
+            () = tx.closed() => {
+                join_set.abort_all();
+                return;
+            }
+            _ = heartbeat.tick() => {
+                if tx.send(SyncStreamEvent::Heartbeat).await.is_err() {
+                    join_set.abort_all();
                     return;
                 }
-                _ = heartbeat.tick() => {
-                    if tx.send(SyncStreamEvent::Heartbeat).await.is_err() {
-                        batch_handle.abort();
-                        return;
-                    }
-                }
-                joined = &mut batch_handle => {
-                    match joined {
-                        Ok(res) => break res,
-                        Err(join_err) => break BatchRunResult {
-                            filed: Vec::new(),
-                            failed: cur_batch_len,
-                            backend_used: None,
-                            usage: None,
-                            last_error: Some(join_err.to_string()),
-                            fatal: false,
-                        },
-                    }
-                }
+                continue;
             }
+            Some(joined) = join_set.join_next() => joined,
         };
 
-        let batch_processed = batch_res.filed.len();
-        let batch_failed = batch_res.failed;
-        let batch_error = batch_res.last_error.clone();
+        let batch_res = match finished {
+            Ok(res) => res,
+            Err(join_err) => BatchLlmResult {
+                batch_index: 0,
+                batch_len: 0,
+                digests: Vec::new(),
+                failed: 0,
+                backend_used: None,
+                usage: None,
+                last_error: Some(join_err.to_string()),
+                fatal: false,
+            },
+        };
+
+        let (filed, commit_failed, commit_err) =
+            commit_batch_digests(&state, batch_res.digests, &slice_hash).await;
+        let batch_processed = filed.len();
+        let batch_failed = batch_res.failed.saturating_add(commit_failed);
+        let batch_error = commit_err.or(batch_res.last_error);
         let batch_usage = batch_res.usage;
         let is_fatal = batch_res.fatal;
 
@@ -1141,42 +1470,53 @@ async fn run_sync_stream_coordinator(
         merge_opt_usage(&mut summary.usage, batch_usage.as_ref());
         summary.processed += batch_processed;
         summary.failed += batch_failed;
-        if batch_res.last_error.is_some() {
-            summary.last_error = batch_res.last_error;
+        if batch_error.is_some() {
+            summary.last_error.clone_from(&batch_error);
         }
-        completed = completed.saturating_add(cur_batch_len);
+        completed = completed.saturating_add(batch_res.batch_len);
 
+        if warming_up {
+            warming_up = false;
+        }
         if is_fatal {
+            fatal_stopped = true;
+            join_set.abort_all();
             let remaining_items = total_items.saturating_sub(completed);
-            summary.skipped += remaining_items;
+            summary.skipped = summary.skipped.saturating_add(remaining_items);
         }
 
         state.record_last_sync(summary.clone());
-        if let Ok(plane) = state.build_plane_snapshot(days, anchor).await {
-            let done_ev = SyncStreamEvent::BatchDone(Box::new(SyncBatchDoneDto {
-                batch_index,
-                total_batches,
-                batch_processed,
-                batch_failed,
-                filed: batch_res.filed,
-                error: batch_error,
-                processed: summary.processed,
-                failed: summary.failed,
-                skipped: summary.skipped,
-                completed,
-                total: total_items,
-                backend_used: summary.backend_used.clone(),
-                batch_usage,
-                cumulative_usage: summary.usage.clone(),
-                plane,
-            }));
-            if tx.send(done_ev).await.is_err() {
-                return;
-            }
+        let done_ev = SyncStreamEvent::BatchDone(Box::new(SyncBatchDoneDto {
+            batch_index: batch_res.batch_index,
+            total_batches,
+            batch_processed,
+            batch_failed,
+            filed,
+            error: batch_error,
+            processed: summary.processed,
+            failed: summary.failed,
+            skipped: summary.skipped,
+            completed,
+            total: total_items,
+            backend_used: summary.backend_used.clone(),
+            batch_usage,
+            cumulative_usage: summary.usage.clone(),
+            plane: None,
+        }));
+        if tx.send(done_ev).await.is_err() {
+            join_set.abort_all();
+            return;
         }
 
-        if is_fatal {
+        if fatal_stopped {
             break;
+        }
+    }
+
+    if !fatal_stopped {
+        let remaining_items = total_items.saturating_sub(completed);
+        if remaining_items > 0 {
+            summary.skipped = summary.skipped.saturating_add(remaining_items);
         }
     }
 
@@ -1221,7 +1561,7 @@ pub async fn regroup_discovered_lines(state: &AppState) -> Result<SyncSummaryDto
     }
 
     let prompt = build_regroup_prompt(&items, &catalog, &settings);
-    let out = run_llm_prompt(&prompt, &settings, &state.hydrated_path).await?;
+    let out = run_llm_prompt(&prompt, &settings, &state.hydrated_path, &state.http_client).await?;
     let reply = out.reply?;
     let assignments = parse_regroup_json(&reply)?;
     let moved = state
@@ -1324,6 +1664,7 @@ fn thinking_tier_for_model(raw_model: &str) -> ThinkingTier {
 #[cfg(test)]
 tokio::task_local! {
     static TEST_BILLING_PROVIDER_OVERRIDE: Option<&'static str>;
+    static TEST_RETRY_BASE_DELAY_MS_OVERRIDE: Option<u64>;
 }
 
 /// Derives billing provider attribution from BOTH the configured provider ID and the resolved
@@ -1543,9 +1884,10 @@ async fn run_llm_prompt(
     prompt: &str,
     settings: &AppSettings,
     hydrated_path: &OsStr,
+    http_client: &reqwest::Client,
 ) -> Result<LlmPromptOutput> {
     if settings.processor_mode == "api" {
-        run_api_prompt(prompt, settings).await
+        run_api_prompt(prompt, settings, http_client).await
     } else {
         run_cli_prompt(prompt, settings, hydrated_path).await
     }
@@ -1851,27 +2193,27 @@ fn resolve_api_endpoint<'a>(
     Ok((base, model))
 }
 
-async fn run_api_prompt(prompt: &str, settings: &AppSettings) -> Result<LlmPromptOutput> {
+async fn run_api_prompt(
+    prompt: &str,
+    settings: &AppSettings,
+    client: &reqwest::Client,
+) -> Result<LlmPromptOutput> {
     // Pre-dispatch configuration validation: keep these as hard `Err` with no usage record.
     let provider = settings.api_provider.trim().to_ascii_lowercase();
     let api_key = resolve_api_key(&provider, settings)?;
     let (base, model) = resolve_api_endpoint(&provider, settings)?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(API_TIMEOUT_SECS))
-        .build()
-        .map_err(|err| PlanarError::External(format!("HTTP client init failed: {err}")))?;
 
     let backend_label = format!("api:{provider}");
     let billing_provider = resolve_billing_provider(&provider, base);
 
     let dispatched = match provider.as_str() {
-        "gemini" => call_gemini_api(&client, base, model, &api_key, prompt, billing_provider).await,
+        "gemini" => call_gemini_api(client, base, model, &api_key, prompt, billing_provider).await,
         "anthropic" => {
-            call_anthropic_api(&client, base, model, &api_key, prompt, billing_provider).await
+            call_anthropic_api(client, base, model, &api_key, prompt, billing_provider).await
         }
         other => {
             call_openai_compat_api(
-                &client,
+                client,
                 other,
                 base,
                 model,
@@ -2325,24 +2667,154 @@ async fn call_openai_compat_api(
     Ok((reply, usage))
 }
 
-async fn send_json_post(req: reqwest::RequestBuilder, label: &str) -> Result<Value> {
-    let resp = req
-        .send()
-        .await
-        .map_err(|err| PlanarError::External(format!("{label} request failed: {err}")))?;
-    let status = resp.status();
-    let body_text = resp
-        .text()
-        .await
-        .map_err(|err| PlanarError::External(format!("{label} body read failed: {err}")))?;
-    if !status.is_success() {
-        return Err(PlanarError::External(format!(
-            "{label} API HTTP {status}: {}",
-            truncate_chars(body_text.trim(), 240)
-        )));
+fn is_transient_retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+}
+
+/// Parses an RFC 9110 §10.2.3 `Retry-After` header in either `delay-seconds` or `HTTP-date`
+/// (IMF-fixdate / RFC 2822, obsolete RFC 850, or ANSI C `asctime()`) format into a minimum delay
+/// in milliseconds relative to `now`.
+fn parse_retry_after_ms(raw: &str, now: DateTime<Utc>) -> Option<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    serde_json::from_str::<Value>(&body_text)
-        .map_err(|err| PlanarError::External(format!("{label} returned invalid JSON: {err}")))
+    if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return trimmed.parse::<u64>().ok().map(|s| s.saturating_mul(1_000));
+    }
+
+    let target_utc = DateTime::parse_from_rfc2822(trimmed)
+        .map(|dt| dt.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(trimmed, "%a, %d %b %Y %H:%M:%S GMT")
+                .ok()
+                .map(|dt| dt.and_utc())
+        })
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(trimmed, "%A, %d-%b-%y %H:%M:%S GMT")
+                .ok()
+                .map(|dt| dt.and_utc())
+        })
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(trimmed, "%a %b %e %H:%M:%S %Y")
+                .ok()
+                .map(|dt| dt.and_utc())
+        })?;
+
+    let delta_ms = (target_utc - now).num_milliseconds();
+    if delta_ms <= 0 {
+        Some(0)
+    } else {
+        Some(u64::try_from(delta_ms).unwrap_or(u64::MAX))
+    }
+}
+
+/// Computes the retry delay in milliseconds for a transient HTTP `429` / `503` response.
+/// Returns `None` (skipping automatic retry) when a provider's `Retry-After` minimum delay
+/// exceeds our retry budget (`API_RETRY_MAX_DELAY_MS`), so Planar never violates provider
+/// minimums or stalls workers. Always preserves bounded jitter when budget permits.
+fn compute_retry_backoff_ms(
+    attempt: usize,
+    retry_after_header: Option<&str>,
+    now: DateTime<Utc>,
+) -> Option<u64> {
+    let provider_min_ms = retry_after_header.and_then(|raw| parse_retry_after_ms(raw, now));
+    if let Some(min_ms) = provider_min_ms
+        && min_ms > API_RETRY_MAX_DELAY_MS
+    {
+        return None;
+    }
+
+    #[cfg(test)]
+    let test_override = TEST_RETRY_BASE_DELAY_MS_OVERRIDE
+        .try_with(|v| *v)
+        .ok()
+        .flatten();
+    #[cfg(not(test))]
+    let test_override: Option<u64> = None;
+
+    if let Some(base) = test_override {
+        let shift = u32::try_from(attempt).unwrap_or(0).min(4);
+        return Some(base.saturating_mul(1_u64 << shift));
+    }
+
+    let shift = u32::try_from(attempt).unwrap_or(0).min(4);
+    let base_delay =
+        provider_min_ms.unwrap_or_else(|| API_RETRY_BASE_DELAY_MS.saturating_mul(1_u64 << shift));
+    let remaining_budget = API_RETRY_MAX_DELAY_MS.saturating_sub(base_delay);
+    let max_jitter = (API_RETRY_BASE_DELAY_MS / 2).min(remaining_budget);
+    let jitter = if max_jitter == 0 {
+        0
+    } else {
+        let seq = RETRY_JITTER_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = u64::from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos()),
+        );
+        (seq.wrapping_mul(6_364_136_223_846_793_005) ^ nanos) % (max_jitter + 1)
+    };
+    Some(
+        base_delay
+            .saturating_add(jitter)
+            .min(API_RETRY_MAX_DELAY_MS),
+    )
+}
+
+async fn send_json_post(req: reqwest::RequestBuilder, label: &str) -> Result<Value> {
+    let mut current = req;
+    for attempt in 0..=API_TRANSIENT_MAX_RETRIES {
+        let next_attempt = if attempt < API_TRANSIENT_MAX_RETRIES {
+            current.try_clone()
+        } else {
+            None
+        };
+        let resp = current
+            .send()
+            .await
+            .map_err(|err| PlanarError::External(format!("{label} request failed: {err}")))?;
+        let status = resp.status();
+
+        // Decide transient retry eligibility BEFORE reading the response body so truncated/reset
+        // 429/503 gateway responses still retry cleanly, while skipping automatic retry whenever
+        // the provider's `Retry-After` minimum delay exceeds our retry budget.
+        if is_transient_retryable_status(status)
+            && let Some(cloned) = next_attempt
+        {
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            if let Some(delay_ms) =
+                compute_retry_backoff_ms(attempt, retry_after.as_deref(), Utc::now())
+            {
+                drop(resp);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                current = cloned;
+                continue;
+            }
+        }
+
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|err| PlanarError::External(format!("{label} body read failed: {err}")))?;
+
+        if !status.is_success() {
+            return Err(PlanarError::External(format!(
+                "{label} API HTTP {status}: {}",
+                truncate_chars(body_text.trim(), 240)
+            )));
+        }
+        return serde_json::from_str::<Value>(&body_text)
+            .map_err(|err| PlanarError::External(format!("{label} returned invalid JSON: {err}")));
+    }
+    Err(PlanarError::External(format!(
+        "{label} API failed after {API_TRANSIENT_MAX_RETRIES} retries"
+    )))
 }
 
 fn format_existing_lines(catalog: &[LineCatalogEntry]) -> String {
@@ -2549,6 +3021,358 @@ fn append_slice_section(buf: &mut String, heading: &str, steps: &[SlicedStep]) {
     for step in steps {
         let _ = writeln!(buf, "[{} #{}] {}", step.role, step.index, step.text);
     }
+}
+
+/// Conservative byte-level pre-filter that skips non-dialogue lines (such as multi-megabyte tool
+/// call payloads, progress snapshots, and telemetry events) before invoking `serde_json`.
+/// Any line containing JSON `\u` escapes conservatively falls through to full parsing.
+fn can_possibly_be_dialogue_line(harness: &str, line: &str) -> bool {
+    if line.contains("\\u") {
+        return true;
+    }
+    match harness {
+        "antigravity" => line.contains("\"USER_INPUT\"") || line.contains("\"PLANNER_RESPONSE\""),
+        "codex" => {
+            line.contains("\"response_item\"")
+                && line.contains("\"message\"")
+                && (line.contains("\"user\"") || line.contains("\"assistant\""))
+        }
+        "claude" => {
+            (line.contains("\"user\"") || line.contains("\"assistant\""))
+                && line.contains("\"message\"")
+                && line.contains("\"content\"")
+        }
+        "dsh" => {
+            line.contains("\"user\"")
+                || line.contains("\"USER_INPUT\"")
+                || line.contains("\"user_message\"")
+                || line.contains("\"assistant\"")
+                || line.contains("\"model\"")
+                || line.contains("\"agent\"")
+                || line.contains("\"PLANNER_RESPONSE\"")
+                || line.contains("\"assistant_message\"")
+        }
+        _ => false,
+    }
+}
+
+#[derive(Deserialize)]
+struct AgSliceLine<'a> {
+    #[serde(rename = "type", borrow)]
+    record_type: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    content: Option<Cow<'a, str>>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeSliceLine<'a> {
+    #[serde(rename = "type", borrow)]
+    record_type: Option<Cow<'a, str>>,
+    #[serde(rename = "isMeta")]
+    is_meta: Option<bool>,
+    #[serde(rename = "isSidechain")]
+    is_sidechain: Option<bool>,
+    #[serde(borrow)]
+    message: Option<&'a RawValue>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeSliceMessage<'a> {
+    #[serde(borrow)]
+    content: Option<&'a RawValue>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeSliceTextObj<'a> {
+    #[serde(borrow)]
+    text: Option<Cow<'a, str>>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeSliceBlock<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    text: Option<Cow<'a, str>>,
+}
+
+#[derive(Deserialize)]
+struct CodexSliceLine<'a> {
+    #[serde(rename = "type", borrow)]
+    record_type: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    payload: Option<&'a RawValue>,
+}
+
+#[derive(Deserialize)]
+struct CodexSlicePayloadHeader<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    role: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    content: Option<&'a RawValue>,
+}
+
+#[derive(Deserialize)]
+struct DshSliceHeader<'a> {
+    #[serde(rename = "type", borrow)]
+    record_type: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    role: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    message: Option<&'a RawValue>,
+}
+
+#[derive(Deserialize)]
+struct DshSliceMsgRole<'a> {
+    #[serde(borrow)]
+    role: Option<Cow<'a, str>>,
+}
+
+fn extract_step_text_fast(harness: &str, line: &str) -> Option<(&'static str, String)> {
+    // Baseline `extract_step_text` only extracts fields from JSON objects (`val.get(...)`);
+    // rejecting non-object lines up front also prevents serde struct `visit_seq` array matching.
+    if !line.trim_start().starts_with('{') || !can_possibly_be_dialogue_line(harness, line) {
+        return None;
+    }
+    let fast_res = match harness {
+        "claude" => extract_claude_step_fast(line),
+        "codex" => extract_codex_step_fast(line),
+        "antigravity" => extract_antigravity_step_fast(line),
+        "dsh" => extract_dsh_step_fast(line),
+        _ => return None,
+    };
+    if let Ok(step) = fast_res {
+        step
+    } else {
+        let val = serde_json::from_str::<Value>(line).ok()?;
+        extract_step_text(harness, &val)
+    }
+}
+
+fn extract_antigravity_step_fast(
+    line: &str,
+) -> std::result::Result<Option<(&'static str, String)>, ()> {
+    let rec: AgSliceLine<'_> = serde_json::from_str(line).map_err(|_| ())?;
+    let Some(rtype) = rec.record_type.as_deref() else {
+        return Ok(None);
+    };
+    let Some(content) = rec.content.as_deref() else {
+        return Ok(None);
+    };
+    if rtype == "USER_INPUT" {
+        let req = extract_antigravity_user_request(content);
+        let unwrapped = strip_delegation_envelope(&req);
+        Ok((!unwrapped.is_empty()).then(|| ("user", unwrapped.to_string())))
+    } else if rtype == "PLANNER_RESPONSE" {
+        let trimmed = content.trim();
+        Ok((!trimmed.is_empty()).then(|| ("agent", trimmed.to_string())))
+    } else {
+        Ok(None)
+    }
+}
+
+fn extract_claude_step_fast(line: &str) -> std::result::Result<Option<(&'static str, String)>, ()> {
+    let rec: ClaudeSliceLine<'_> = serde_json::from_str(line).map_err(|_| ())?;
+    let Some(rtype) = rec.record_type.as_deref() else {
+        return Ok(None);
+    };
+    if !matches!(rtype, "user" | "assistant") {
+        return Ok(None);
+    }
+    if rec.is_meta.unwrap_or(false) || rec.is_sidechain.unwrap_or(false) {
+        return Ok(None);
+    }
+    let Some(msg_raw) = rec.message else {
+        return Ok(None);
+    };
+    let msg_json = msg_raw.get().trim_start();
+    if !msg_json.starts_with('{') {
+        return Ok(None);
+    }
+    let msg: ClaudeSliceMessage<'_> = serde_json::from_str(msg_json).map_err(|_| ())?;
+    let Some(content_raw) = msg.content else {
+        return Ok(None);
+    };
+    let content_json = content_raw.get().trim_start();
+    let first_byte = content_json.as_bytes().first().copied();
+
+    if rtype == "user" {
+        let human = match first_byte {
+            Some(b'"') => {
+                let s: Cow<'_, str> = serde_json::from_str(content_json).map_err(|_| ())?;
+                let trimmed = s.trim();
+                if trimmed.is_empty() || is_claude_synthetic_wrapper(trimmed) {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            Some(b'[') => {
+                let raw_blocks: Vec<&RawValue> =
+                    serde_json::from_str(content_json).map_err(|_| ())?;
+                let mut joined = String::new();
+                for raw_block in raw_blocks {
+                    let block_json = raw_block.get().trim_start();
+                    if !block_json.starts_with('{') {
+                        continue;
+                    }
+                    let block: ClaudeSliceBlock<'_> =
+                        serde_json::from_str(block_json).map_err(|_| ())?;
+                    if block.kind.as_deref() != Some("text") {
+                        continue;
+                    }
+                    let Some(txt) = block.text.as_deref() else {
+                        continue;
+                    };
+                    let trimmed = txt.trim();
+                    if trimmed.is_empty() || is_claude_synthetic_wrapper(trimmed) {
+                        continue;
+                    }
+                    if !joined.is_empty() {
+                        joined.push(' ');
+                    }
+                    joined.push_str(trimmed);
+                }
+                (!joined.is_empty()).then_some(joined)
+            }
+            _ => None,
+        };
+        let Some(human) = human else {
+            return Ok(None);
+        };
+        let unwrapped = strip_delegation_envelope(&human);
+        Ok((!unwrapped.is_empty()).then(|| ("user", unwrapped.to_string())))
+    } else {
+        let text = match first_byte {
+            Some(b'"') => {
+                let s: Cow<'_, str> = serde_json::from_str(content_json).map_err(|_| ())?;
+                let trimmed = s.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }
+            Some(b'[') => {
+                let raw_blocks: Vec<&RawValue> =
+                    serde_json::from_str(content_json).map_err(|_| ())?;
+                let mut joined = String::new();
+                for raw_block in raw_blocks {
+                    let block_json = raw_block.get().trim_start();
+                    if !block_json.starts_with('{') {
+                        continue;
+                    }
+                    let block: ClaudeSliceBlock<'_> =
+                        serde_json::from_str(block_json).map_err(|_| ())?;
+                    let kind = block.kind.as_deref().unwrap_or("text");
+                    if matches!(
+                        kind,
+                        "tool_use"
+                            | "tool_result"
+                            | "thinking"
+                            | "reasoning"
+                            | "tool_call"
+                            | "function_call"
+                            | "function_call_output"
+                            | "custom_tool_call"
+                            | "custom_tool_call_output"
+                    ) {
+                        continue;
+                    }
+                    if let Some(txt) = block.text.as_deref() {
+                        let trimmed = txt.trim();
+                        if !trimmed.is_empty() {
+                            if !joined.is_empty() {
+                                joined.push(' ');
+                            }
+                            joined.push_str(trimmed);
+                        }
+                    }
+                }
+                (!joined.is_empty()).then_some(joined)
+            }
+            Some(b'{') => {
+                let obj: ClaudeSliceTextObj<'_> =
+                    serde_json::from_str(content_json).map_err(|_| ())?;
+                obj.text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            }
+            _ => None,
+        };
+        Ok(text.map(|t| ("agent", t)))
+    }
+}
+
+fn extract_codex_step_fast(line: &str) -> std::result::Result<Option<(&'static str, String)>, ()> {
+    let rec: CodexSliceLine<'_> = serde_json::from_str(line).map_err(|_| ())?;
+    if rec.record_type.as_deref() != Some("response_item") {
+        return Ok(None);
+    }
+    let Some(payload_raw) = rec.payload else {
+        return Ok(None);
+    };
+    let payload_json = payload_raw.get().trim_start();
+    if !payload_json.starts_with('{') {
+        return Ok(None);
+    }
+    let header: CodexSlicePayloadHeader<'_> = serde_json::from_str(payload_json).map_err(|_| ())?;
+    if header.kind.as_deref() != Some("message") {
+        return Ok(None);
+    }
+    let Some(role) = header.role.as_deref() else {
+        return Ok(None);
+    };
+    if role != "user" && role != "assistant" {
+        return Ok(None);
+    }
+    let Some(content_raw) = header.content else {
+        return Ok(None);
+    };
+    let content_val: Value = serde_json::from_str(content_raw.get()).map_err(|_| ())?;
+    if role == "user" {
+        let Some(human) = extract_codex_user_value(&content_val) else {
+            return Ok(None);
+        };
+        let unwrapped = strip_delegation_envelope(&human);
+        Ok((!unwrapped.is_empty()).then(|| ("user", unwrapped.to_string())))
+    } else {
+        Ok(extract_text_from_value(&content_val).map(|t| ("agent", t)))
+    }
+}
+
+fn extract_dsh_step_fast(line: &str) -> std::result::Result<Option<(&'static str, String)>, ()> {
+    let header: DshSliceHeader<'_> = serde_json::from_str(line).map_err(|_| ())?;
+    let rtype = header.record_type.as_deref().unwrap_or("");
+    let msg_role = match header.message {
+        Some(msg_raw) if msg_raw.get().trim_start().starts_with('{') => {
+            let parsed: DshSliceMsgRole<'_> =
+                serde_json::from_str(msg_raw.get().trim_start()).map_err(|_| ())?;
+            parsed.role
+        }
+        _ => None,
+    };
+    let role = header.role.as_deref().or(msg_role.as_deref()).unwrap_or("");
+    if role == "tool"
+        || matches!(
+            rtype,
+            "tool" | "tool_result" | "tool_use" | "function_call" | "function_call_output"
+        )
+    {
+        return Ok(None);
+    }
+    let is_user = role == "user" || matches!(rtype, "user" | "USER_INPUT" | "user_message");
+    let is_agent = role == "assistant"
+        || role == "model"
+        || matches!(
+            rtype,
+            "assistant" | "agent" | "PLANNER_RESPONSE" | "assistant_message"
+        );
+    if !is_user && !is_agent {
+        return Ok(None);
+    }
+    let val: Value = serde_json::from_str(line).map_err(|_| ())?;
+    Ok(extract_dsh_step(&val))
 }
 
 fn extract_step_text(harness: &str, val: &Value) -> Option<(&'static str, String)> {
@@ -2930,7 +3754,10 @@ mod tests {
             api_key: "test-key".to_string(),
             ..AppSettings::default()
         };
-        let err = run_api_prompt("ping", &settings).await.unwrap_err();
+        let client = build_shared_http_client();
+        let err = run_api_prompt("ping", &settings, &client)
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("API Base URL is required"),
             "unexpected error: {err}"
@@ -3923,5 +4750,1223 @@ mod tests {
         assert_eq!(usage.api_calls, 1);
         assert_eq!(usage.priced_calls, 0);
         assert!(usage.incomplete);
+    }
+
+    fn slice_trajectory_file_baseline(
+        source_path: &Path,
+        harness: &str,
+        settings: &AppSettings,
+    ) -> Result<SlicedTrajectory> {
+        let mut raw_turns: Vec<(usize, &'static str, String)> = Vec::new();
+        let mut user_count = 0_usize;
+        let user_limit = usize::try_from(settings.longest_user_chars)
+            .unwrap_or(usize::MAX)
+            .max(SLICER_CHAR_BUDGET_MIN);
+        let agent_limit = usize::try_from(settings.longest_agent_chars)
+            .unwrap_or(usize::MAX)
+            .max(SLICER_CHAR_BUDGET_MIN);
+
+        stream_jsonl_lines(source_path, 0, |line| {
+            let Ok(val) = serde_json::from_str::<Value>(line) else {
+                return Ok(());
+            };
+            let Some((role, text)) = extract_step_text(harness, &val) else {
+                return Ok(());
+            };
+            if text.contains(INTERNAL_DIGEST_SENTINEL) {
+                return Ok(());
+            }
+            let cleaned = normalize_step_text(&text);
+            if cleaned.is_empty() {
+                return Ok(());
+            }
+            let max_len = if role == "user" {
+                user_count += 1;
+                user_limit
+            } else {
+                agent_limit
+            };
+            let idx = raw_turns.len() + 1;
+            raw_turns.push((idx, role, truncate_chars(&cleaned, max_len)));
+            Ok(())
+        })?;
+
+        let total_steps = raw_turns.len();
+        let open_n = usize::try_from(settings.opening_steps).unwrap_or(usize::MAX);
+        let close_n = usize::try_from(settings.closing_steps).unwrap_or(usize::MAX);
+        let head_end = open_n.min(total_steps);
+        let tail_start = total_steps.saturating_sub(close_n).max(head_end);
+
+        let to_step = |(index, role, text): &(usize, &'static str, String)| SlicedStep {
+            index: *index,
+            role,
+            text: text.clone(),
+        };
+
+        let head = raw_turns[..head_end].iter().map(to_step).collect();
+        let middle_users = raw_turns[head_end..tail_start]
+            .iter()
+            .filter(|(_, role, _)| *role == "user")
+            .map(to_step)
+            .collect();
+        let tail = raw_turns[tail_start..].iter().map(to_step).collect();
+
+        Ok(SlicedTrajectory {
+            total_steps,
+            user_count,
+            head,
+            middle_users,
+            tail,
+        })
+    }
+
+    #[test]
+    fn fast_skipped_tool_line_slicing_matches_baseline_across_all_four_harnesses() {
+        let settings = AppSettings {
+            opening_steps: 2,
+            closing_steps: 2,
+            longest_user_chars: 140,
+            longest_agent_chars: 160,
+            ..AppSettings::default()
+        };
+        let huge_payload = format!(
+            "{} \"user\" \"assistant\" \"USER_INPUT\"",
+            "X".repeat(8_192)
+        );
+
+        // 1. Claude fixture: progress/snapshot, huge tool_result, mixed tool_use + text, unicode escape,
+        //    sentinel, malformed line, top-level array, non-object message, array/primitive blocks in content,
+        //    and unexpected field types.
+        let mut claude_tmp = NamedTempFile::new().unwrap();
+        let claude_lines = [
+            serde_json::json!({"type":"progress","data":{"msg":"ignored progress"}}).to_string(),
+            serde_json::json!({"type":"file-history-snapshot","snapshot":{"files":[]}}).to_string(),
+            serde_json::json!(["user", false, false, {"content": "fake array record"}]).to_string(),
+            serde_json::json!({"type":"user","message":["fake array message"]}).to_string(),
+            serde_json::json!({"type":"assistant","message":{"content":["fake-single-string-array"]}}).to_string(),
+            serde_json::json!({"type":"user","message":{"role":"user","content":[["text","fake-array-block"], "bare-string", 42, {"type":"text","text":123}]}}).to_string(),
+            serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[["text","fake-array-block"], "bare-string", {"type":"text","text":"Mixed array valid reply"}]}}).to_string(),
+            serde_json::json!({"type":"user","isMeta":true,"message":{"role":"user","content":"meta skipped"}}).to_string(),
+            serde_json::json!({"type":"user","isMeta":"not-a-bool","message":{"role":"user","content":"Non-bool isMeta falls back cleanly"}}).to_string(),
+            serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":huge_payload}]}}).to_string(),
+            serde_json::json!({"type":"user","message":{"role":"user","content":"Claude turn 1"}}).to_string(),
+            serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":huge_payload},{"type":"tool_use","name":"bash","input":{"cmd":"ls"}},{"type":"text","text":"Claude reply 1"}]}}).to_string(),
+            serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"big"},{"type":"text","text":"<system-reminder>skip</system-reminder>"},{"type":"text","text":"Claude turn 2"}]}}).to_string(),
+            r#"{"type":"\u0075ser","message":{"role":"user","content":"Unicode escaped user turn"}}"#.to_string(),
+            serde_json::json!({"type":"user","message":{"role":"user","content":format!("{INTERNAL_DIGEST_SENTINEL} echo")}}).to_string(),
+            serde_json::json!({"type":"assistant","message":{"role":"assistant","content":{"text":"Object text reply"}}}).to_string(),
+            "{broken json line".to_string(),
+        ];
+        for l in &claude_lines {
+            writeln!(claude_tmp, "{l}").unwrap();
+        }
+        let fast_claude = slice_trajectory_file(claude_tmp.path(), "claude", &settings).unwrap();
+        let base_claude =
+            slice_trajectory_file_baseline(claude_tmp.path(), "claude", &settings).unwrap();
+        assert_eq!(fast_claude, base_claude);
+        assert_eq!(fast_claude.user_count, 4);
+        assert_eq!(fast_claude.total_steps, 7);
+
+        // 2. Codex fixture: session_meta, function_call_output with "user"/"message" inside, reasoning,
+        //    top-level array, non-object payload, and real messages.
+        let mut codex_tmp = NamedTempFile::new().unwrap();
+        let codex_lines = [
+            serde_json::json!({"type":"session_meta","payload":{"id":"c1","cwd":"/tmp/a"}}).to_string(),
+            serde_json::json!(["response_item", ["message", "user", "fake array record"]]).to_string(),
+            serde_json::json!({"type":"response_item","payload":["message","user","fake array payload"]}).to_string(),
+            serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_tokens":999}}}).to_string(),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"1","output":huge_payload}}).to_string(),
+            serde_json::json!({"type":"response_item","payload":{"type":"reasoning","summary":[{"text":"thinking"}]}}).to_string(),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Codex turn 1"}]}}).to_string(),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Codex reply 1"}]}}).to_string(),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":"Codex string turn 2"}}).to_string(),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"developer","content":"ignored developer"}}).to_string(),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"tool_call","text":"skip"},{"type":"output_text","text":"Codex reply 2"}]}}).to_string(),
+        ];
+        for l in &codex_lines {
+            writeln!(codex_tmp, "{l}").unwrap();
+        }
+        let fast_codex = slice_trajectory_file(codex_tmp.path(), "codex", &settings).unwrap();
+        let base_codex =
+            slice_trajectory_file_baseline(codex_tmp.path(), "codex", &settings).unwrap();
+        assert_eq!(fast_codex, base_codex);
+        assert_eq!(fast_codex.user_count, 2);
+        assert_eq!(fast_codex.total_steps, 4);
+
+        // 3. Antigravity fixture: TOOL_CALL / TOOL_RESULT with huge payload, top-level array + USER_INPUT / PLANNER_RESPONSE
+        let mut ag_tmp = NamedTempFile::new().unwrap();
+        let ag_lines = [
+            serde_json::json!(["USER_INPUT", "fake array record"]).to_string(),
+            serde_json::json!(["PLANNER_RESPONSE", "fake array reply"]).to_string(),
+            serde_json::json!({"type":"TOOL_CALL","content":"run_command"}).to_string(),
+            serde_json::json!({"type":"TOOL_RESULT","content":huge_payload}).to_string(),
+            serde_json::json!({"type":"USER_INPUT","content":"<USER_REQUEST>AG prompt 1</USER_REQUEST>"}).to_string(),
+            serde_json::json!({"type":"PLANNER_RESPONSE","content":"AG reply 1"}).to_string(),
+            serde_json::json!({"type":"THINKING","content":"internal thought"}).to_string(),
+            serde_json::json!({"type":"USER_INPUT","content":"AG prompt 2"}).to_string(),
+            serde_json::json!({"type":"PLANNER_RESPONSE","content":"AG reply 2"}).to_string(),
+        ];
+        for l in &ag_lines {
+            writeln!(ag_tmp, "{l}").unwrap();
+        }
+        let fast_ag = slice_trajectory_file(ag_tmp.path(), "antigravity", &settings).unwrap();
+        let base_ag =
+            slice_trajectory_file_baseline(ag_tmp.path(), "antigravity", &settings).unwrap();
+        assert_eq!(fast_ag, base_ag);
+        assert_eq!(fast_ag.user_count, 2);
+        assert_eq!(fast_ag.total_steps, 4);
+
+        // 4. DSH fixture: role=tool with "user" inside content, top-level array, non-object message,
+        //    tool_result, user_message, model, assistant.
+        let mut dsh_tmp = NamedTempFile::new().unwrap();
+        let dsh_lines = [
+            serde_json::json!(["user", "user", ["user"]]).to_string(),
+            serde_json::json!({"type":"other","message":["user"]}).to_string(),
+            serde_json::json!({"type":"session_meta","session_id":"d1"}).to_string(),
+            serde_json::json!({"type":"tool_result","role":"tool","content":huge_payload}).to_string(),
+            serde_json::json!({"type":"function_call_output","content":"ignored output"}).to_string(),
+            serde_json::json!({"role":"user","content":"DSH user 1"}).to_string(),
+            serde_json::json!({"role":"assistant","content":[{"type":"tool_use","name":"read"},{"type":"text","text":"DSH agent 1"}]}).to_string(),
+            serde_json::json!({"type":"user_message","message":{"role":"user","text":"DSH user 2"}}).to_string(),
+            serde_json::json!({"role":"model","text":"DSH model 2"}).to_string(),
+        ];
+        for l in &dsh_lines {
+            writeln!(dsh_tmp, "{l}").unwrap();
+        }
+        let fast_dsh = slice_trajectory_file(dsh_tmp.path(), "dsh", &settings).unwrap();
+        let base_dsh = slice_trajectory_file_baseline(dsh_tmp.path(), "dsh", &settings).unwrap();
+        assert_eq!(fast_dsh, base_dsh);
+        assert_eq!(fast_dsh.user_count, 2);
+        assert_eq!(fast_dsh.total_steps, 4);
+    }
+
+    #[test]
+    fn cwd_affinity_ordering_packs_same_workspace_and_preserves_first_seen_priority() {
+        let mk = |id: &str, cwd: Option<&str>| PreparedSession {
+            cand: SyncCandidate {
+                id: id.to_string(),
+                harness: "codex".to_string(),
+                source_path: format!("/tmp/{id}.jsonl"),
+                step_count: 6,
+                user_input_count: 3,
+                first_user_prompt: id.to_string(),
+                cwd: cwd.map(str::to_string),
+                line_id: None,
+            },
+            sliced: SlicedTrajectory {
+                total_steps: 2,
+                user_count: 1,
+                head: Vec::new(),
+                middle_users: Vec::new(),
+                tail: Vec::new(),
+            },
+            approx_chars: 256,
+        };
+
+        let items = vec![
+            mk("a1", Some("/work/alpha")),
+            mk("b1", Some("/work/beta")),
+            mk("a2", Some("/work/alpha/")), // trailing slash normalizes to `/work/alpha`
+            mk("n1", None),
+            mk("b2", Some("/work/beta")),
+            mk("a3", Some("/work/alpha")),
+            mk("n2", Some("   ")),
+        ];
+
+        let ordered = order_prepared_by_cwd_affinity(items);
+        let ids: Vec<&str> = ordered.iter().map(|p| p.cand.id.as_str()).collect();
+        assert_eq!(ids, vec!["a1", "a2", "a3", "b1", "b2", "n1", "n2"]);
+
+        let batches = chunk_prepared_into_batches(ordered, 3);
+        assert_eq!(batches.len(), 3);
+        let b0: Vec<&str> = batches[0].iter().map(|p| p.cand.id.as_str()).collect();
+        let b1: Vec<&str> = batches[1].iter().map(|p| p.cand.id.as_str()).collect();
+        assert_eq!(b0, vec!["a1", "a2", "a3"]);
+        assert_eq!(b1, vec!["b1", "b2", "n1"]);
+    }
+
+    #[test]
+    fn effective_sync_concurrency_bounds_api_and_caps_local_cli() {
+        let mut s = AppSettings::default();
+        assert_eq!(s.sync_concurrency, 4);
+
+        s.processor_mode = "api".to_string();
+        assert_eq!(effective_sync_concurrency(&s), 4);
+        s.sync_concurrency = 99;
+        assert_eq!(effective_sync_concurrency(&s), SYNC_CONCURRENCY_MAX);
+        s.sync_concurrency = 0;
+        assert_eq!(effective_sync_concurrency(&s), SYNC_CONCURRENCY_MIN);
+
+        s.processor_mode = "cli".to_string();
+        s.sync_concurrency = 4;
+        assert_eq!(effective_sync_concurrency(&s), SYNC_CLI_CONCURRENCY_CAP);
+        s.sync_concurrency = 1;
+        assert_eq!(effective_sync_concurrency(&s), 1);
+    }
+
+    fn seed_codex_test_sessions(
+        dir: &Path,
+        specs: &[(&str, &str)],
+    ) -> (PathBuf, crate::env::HarnessRoots) {
+        let roots = crate::env::HarnessRoots {
+            claude_projects: dir.join("claude"),
+            codex_sessions: dir.join("codex").join("sessions"),
+            codex_archived: dir.join("codex").join("archived_sessions"),
+            antigravity_brain: dir.join("antigravity"),
+            dsh_sessions: dir.join("dsh").join("sessions"),
+        };
+        let sess_dir = roots.codex_sessions.join("2026").join("11").join("25");
+        fs::create_dir_all(&sess_dir).unwrap();
+        let now = Local::now();
+        for (idx, (sid, cwd)) in specs.iter().enumerate() {
+            let offset = i64::try_from(idx + 1).unwrap_or(1) * 5;
+            let t1 = (now - chrono::Duration::minutes(offset + 3)).to_rfc3339();
+            let t2 = (now - chrono::Duration::minutes(offset + 2)).to_rfc3339();
+            let t3 = (now - chrono::Duration::minutes(offset + 1)).to_rfc3339();
+            fs::write(
+                sess_dir.join(format!("rollout-{sid}.jsonl")),
+                format!(
+                    concat!(
+                        "{{\"timestamp\":\"{t1}\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{sid}\",\"cwd\":\"{cwd}\",\"source\":\"vscode\"}}}}\n",
+                        "{{\"timestamp\":\"{t1}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 1 {sid}\"}}]}}}}\n",
+                        "{{\"timestamp\":\"{t2}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 2 {sid}\"}}]}}}}\n",
+                        "{{\"timestamp\":\"{t3}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 3 {sid}\"}}]}}}}\n"
+                    ),
+                    t1 = t1,
+                    t2 = t2,
+                    t3 = t3,
+                    sid = sid,
+                    cwd = cwd,
+                ),
+            )
+            .unwrap();
+        }
+        (dir.join("planar.db"), roots)
+    }
+
+    #[tokio::test]
+    async fn concurrent_sync_respects_semaphore_bound_preserves_pinned_lines_and_streams_lightweight_batches()
+     {
+        use std::sync::atomic::AtomicUsize;
+
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tempfile::TempDir;
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak_in_flight = Arc::new(AtomicUsize::new(0));
+        let in_flight_ref = in_flight.clone();
+        let peak_ref = peak_in_flight.clone();
+
+        let mock_api = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let cur_arc = in_flight_ref.clone();
+                let pk_arc = peak_ref.clone();
+                async move {
+                    let cur = cur_arc.fetch_add(1, Ordering::SeqCst) + 1;
+                    pk_arc.fetch_max(cur, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                    cur_arc.fetch_sub(1, Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {
+                                "content": "{\"title\":\"Concurrent Digest\",\"stoppedAt\":\"Done\",\"leftOpen\":\"\",\"suggestedLine\":\"Shared Line\",\"isOneOff\":false}"
+                            }
+                        }],
+                        "usage": { "prompt_tokens": 1000, "completion_tokens": 100 }
+                    }))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_api).await;
+        });
+
+        let dir = TempDir::new().unwrap();
+        let specs = [
+            ("c1", "/tmp/ws-a"),
+            ("c2", "/tmp/ws-b"),
+            ("c3", "/tmp/ws-c"),
+            ("c4", "/tmp/ws-d"),
+            ("c5", "/tmp/ws-e"),
+            ("c6", "/tmp/ws-f"),
+        ];
+        let (db_path, roots) = seed_codex_test_sessions(dir.path(), &specs);
+        let pinned_line_id = {
+            let mut store = crate::db::Store::open(&db_path).unwrap();
+            crate::ingest::scan_all_harnesses(&mut store, &roots).unwrap();
+            let pinned_id = store.create_line("Pinned Keep").unwrap();
+            // Pin `codex:c1` to the pinned Line before Sync runs with `force_all = true`.
+            store
+                .update_session(
+                    "codex:c1",
+                    &crate::model::LineIdUpdate::Set(pinned_id.clone()),
+                    None,
+                )
+                .unwrap();
+            let settings = AppSettings {
+                processor_configured: true,
+                processor_mode: "api".to_string(),
+                api_provider: "openai".to_string(),
+                api_base_url: format!("http://{addr}"),
+                api_model: "gpt-4o-mini".to_string(),
+                api_key: "test-key".to_string(),
+                sync_batch_limit: 1,
+                sync_concurrency: 3,
+                ..AppSettings::default()
+            };
+            store.save_settings(&settings).unwrap();
+            pinned_id
+        };
+
+        let state = AppState::new(db_path.clone(), roots);
+        let mut rx = spawn_sync_stream(
+            state,
+            SyncScope {
+                days: 7,
+                anchor_date: None,
+                harness: None,
+            },
+            true,
+            None,
+        );
+
+        let mut start_concurrency = 0;
+        let mut batch_done_count = 0;
+        let mut complete_summary = None;
+        let mut complete_plane = None;
+
+        while let Some(evt) = rx.recv().await {
+            match evt {
+                SyncStreamEvent::Start { concurrency, .. } => start_concurrency = concurrency,
+                SyncStreamEvent::BatchDone(done) => {
+                    batch_done_count += 1;
+                    assert!(
+                        done.plane.is_none(),
+                        "intermediate BatchDone must stay lightweight with plane == None"
+                    );
+                }
+                SyncStreamEvent::Complete { summary, plane } => {
+                    complete_summary = Some(summary);
+                    complete_plane = Some(*plane);
+                }
+                SyncStreamEvent::BatchStart { .. } | SyncStreamEvent::Heartbeat => {}
+            }
+        }
+        server_task.abort();
+
+        assert_eq!(start_concurrency, 3);
+        assert_eq!(batch_done_count, 6);
+        let summary = complete_summary.expect("expected Complete event");
+        assert_eq!(summary.processed, 6);
+        assert_eq!(summary.failed, 0);
+        let peak = peak_in_flight.load(Ordering::SeqCst);
+        assert!(
+            (2..=3).contains(&peak),
+            "expected 2..=3 concurrent in-flight batches under syncConcurrency=3, got {peak}"
+        );
+
+        // Verify pinned Line immutability and zero duplicate unpinned lines under concurrency.
+        let plane = complete_plane.expect("expected full PlaneResponse on Complete");
+        let pinned_line = plane
+            .lines
+            .iter()
+            .find(|l| l.id == pinned_line_id)
+            .expect("pinned line must remain intact");
+        assert!(
+            pinned_line.sessions.iter().any(|s| s.id == "codex:c1"),
+            "pinned session codex:c1 must never be moved by concurrent Sync"
+        );
+        let shared_lines: Vec<_> = plane
+            .lines
+            .iter()
+            .filter(|l| l.name.eq_ignore_ascii_case("Shared Line"))
+            .collect();
+        assert_eq!(
+            shared_lines.len(),
+            1,
+            "concurrent batches suggesting the same Line name must deduplicate cleanly"
+        );
+        assert_eq!(shared_lines[0].sessions.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn transient_http_429_and_503_trigger_bounded_backoff_retry() {
+        use std::sync::atomic::AtomicUsize;
+
+        use axum::Router;
+        use axum::http::{StatusCode, header};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_ref = attempts.clone();
+        let mock_api = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let c = attempts_ref.clone();
+                async move {
+                    match c.fetch_add(1, Ordering::SeqCst) {
+                        0 => (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [(header::RETRY_AFTER, "0")],
+                            "rate limited",
+                        )
+                            .into_response(),
+                        1 => (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            [(header::CONTENT_TYPE, "text/plain")],
+                            "service overloaded",
+                        )
+                            .into_response(),
+                        _ => (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            r#"{"choices":[{"message":{"content":"{\"ok\":true}"}}],"usage":{"prompt_tokens":100,"completion_tokens":20}}"#,
+                        )
+                            .into_response(),
+                    }
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_api).await;
+        });
+
+        let settings = AppSettings {
+            processor_configured: true,
+            processor_mode: "api".to_string(),
+            api_provider: "openai".to_string(),
+            api_base_url: format!("http://{addr}"),
+            api_model: "gpt-4o-mini".to_string(),
+            api_key: "test-key".to_string(),
+            ..AppSettings::default()
+        };
+        let client = build_shared_http_client();
+
+        let out = TEST_RETRY_BASE_DELAY_MS_OVERRIDE
+            .scope(Some(5), async {
+                run_api_prompt("ping", &settings, &client).await
+            })
+            .await
+            .unwrap();
+        server_task.abort();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(out.reply.unwrap(), r#"{"ok":true}"#);
+        assert_eq!(out.usage.api_calls, 1);
+        assert_eq!(out.usage.total_tokens, 120);
+    }
+
+    #[tokio::test]
+    async fn sync_stream_cancellation_drains_on_first_stop_and_aborts_on_drop() {
+        use std::sync::atomic::AtomicUsize;
+
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tempfile::TempDir;
+
+        let started_calls = Arc::new(AtomicUsize::new(0));
+        let finished_calls = Arc::new(AtomicUsize::new(0));
+        let started_ref = started_calls.clone();
+        let finished_ref = finished_calls.clone();
+
+        let mock_api = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let st = started_ref.clone();
+                let fin = finished_ref.clone();
+                async move {
+                    st.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    fin.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {
+                                "content": "{\"title\":\"Drain OK\",\"stoppedAt\":\"Done\",\"leftOpen\":\"\",\"suggestedLine\":\"Cancel Line\",\"isOneOff\":false}"
+                            }
+                        }],
+                        "usage": { "prompt_tokens": 200, "completion_tokens": 50 }
+                    }))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_api).await;
+        });
+
+        let dir = TempDir::new().unwrap();
+        let specs = [
+            ("k1", "/tmp/ws-1"),
+            ("k2", "/tmp/ws-2"),
+            ("k3", "/tmp/ws-3"),
+            ("k4", "/tmp/ws-4"),
+            ("k5", "/tmp/ws-5"),
+            ("k6", "/tmp/ws-6"),
+        ];
+        let (db_path, roots) = seed_codex_test_sessions(dir.path(), &specs);
+        {
+            let mut store = crate::db::Store::open(&db_path).unwrap();
+            crate::ingest::scan_all_harnesses(&mut store, &roots).unwrap();
+            // Seed one existing Line so concurrency starts immediately without warm-up seed.
+            store.create_line("Existing").unwrap();
+            let settings = AppSettings {
+                processor_configured: true,
+                processor_mode: "api".to_string(),
+                api_provider: "openai".to_string(),
+                api_base_url: format!("http://{addr}"),
+                api_model: "gpt-4o-mini".to_string(),
+                api_key: "test-key".to_string(),
+                sync_batch_limit: 1,
+                sync_concurrency: 2,
+                ..AppSettings::default()
+            };
+            store.save_settings(&settings).unwrap();
+        }
+
+        // Part A: First Stop (drain) — stops scheduling new batches while letting the 2 in-flight
+        // batches complete and commit cleanly.
+        let state = AppState::new(db_path.clone(), roots.clone());
+        let mut rx = spawn_sync_stream(
+            state.clone(),
+            SyncScope {
+                days: 7,
+                anchor_date: None,
+                harness: None,
+            },
+            false,
+            None,
+        );
+
+        let mut started_events = 0_usize;
+        let mut final_summary = None;
+        while let Some(evt) = rx.recv().await {
+            match evt {
+                SyncStreamEvent::BatchStart { .. } => {
+                    started_events += 1;
+                    if started_events == 2 {
+                        assert!(
+                            state.request_sync_drain(),
+                            "request_sync_drain should signal active stream"
+                        );
+                    }
+                }
+                SyncStreamEvent::Complete { summary, .. } => {
+                    final_summary = Some(summary);
+                }
+                _ => {}
+            }
+        }
+
+        let summary = final_summary.expect("expected Complete after drain");
+        assert_eq!(summary.processed, 2);
+        assert_eq!(summary.skipped, 4);
+        assert_eq!(started_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(finished_calls.load(Ordering::SeqCst), 2);
+
+        // Part B: Second Stop (drop receiver) — aborts in-flight JoinSet tasks immediately.
+        started_calls.store(0, Ordering::SeqCst);
+        finished_calls.store(0, Ordering::SeqCst);
+        let mut rx2 = spawn_sync_stream(
+            state,
+            SyncScope {
+                days: 7,
+                anchor_date: None,
+                harness: None,
+            },
+            false,
+            None,
+        );
+        while let Some(evt) = rx2.recv().await {
+            if matches!(evt, SyncStreamEvent::BatchStart { .. }) {
+                drop(rx2);
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        server_task.abort();
+
+        let store = crate::db::Store::open(&db_path).unwrap();
+        let remaining = store
+            .load_sync_candidates_in_scope(
+                &store.get_settings().unwrap(),
+                &compute_slice_config_hash(&store.get_settings().unwrap()),
+                false,
+                None,
+                None,
+                Local::now(),
+            )
+            .unwrap();
+        assert_eq!(
+            remaining.len(),
+            4,
+            "dropping stream receiver must abort in-flight tasks before committing their digests"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_start_warmup_runs_first_batch_before_fanning_out() {
+        use std::sync::atomic::AtomicUsize;
+
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tempfile::TempDir;
+
+        let call_seq = Arc::new(AtomicUsize::new(0));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let first_batch_peak = Arc::new(AtomicUsize::new(0));
+        let post_warmup_peak = Arc::new(AtomicUsize::new(0));
+
+        let seq_ref = call_seq.clone();
+        let cur_ref = in_flight.clone();
+        let first_pk = first_batch_peak.clone();
+        let post_pk = post_warmup_peak.clone();
+
+        let mock_api = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let seq = seq_ref.clone();
+                let cur_arc = cur_ref.clone();
+                let fpk = first_pk.clone();
+                let ppk = post_pk.clone();
+                async move {
+                    let n = seq.fetch_add(1, Ordering::SeqCst);
+                    let cur = cur_arc.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n == 0 {
+                        fpk.fetch_max(cur, Ordering::SeqCst);
+                    } else {
+                        ppk.fetch_max(cur, Ordering::SeqCst);
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    cur_arc.fetch_sub(1, Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {
+                                "content": "{\"title\":\"Seeded\",\"stoppedAt\":\"Done\",\"leftOpen\":\"\",\"suggestedLine\":\"Seed Line\",\"isOneOff\":false}"
+                            }
+                        }],
+                        "usage": { "prompt_tokens": 300, "completion_tokens": 60 }
+                    }))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_api).await;
+        });
+
+        let dir = TempDir::new().unwrap();
+        let specs = [
+            ("w1", "/tmp/ws-1"),
+            ("w2", "/tmp/ws-2"),
+            ("w3", "/tmp/ws-3"),
+            ("w4", "/tmp/ws-4"),
+        ];
+        let (db_path, roots) = seed_codex_test_sessions(dir.path(), &specs);
+        {
+            let mut store = crate::db::Store::open(&db_path).unwrap();
+            crate::ingest::scan_all_harnesses(&mut store, &roots).unwrap();
+            // Ensure zero non-system Lines at start.
+            assert_eq!(store.list_line_catalog().unwrap().len(), 0);
+            let settings = AppSettings {
+                processor_configured: true,
+                processor_mode: "api".to_string(),
+                api_provider: "openai".to_string(),
+                api_base_url: format!("http://{addr}"),
+                api_model: "gpt-4o-mini".to_string(),
+                api_key: "test-key".to_string(),
+                sync_batch_limit: 1,
+                sync_concurrency: 3,
+                ..AppSettings::default()
+            };
+            store.save_settings(&settings).unwrap();
+        }
+
+        let state = AppState::new(db_path, roots);
+        let summary = sync_pending_sessions_in_scope(&state, false, Some(4), None)
+            .await
+            .unwrap();
+        server_task.abort();
+
+        assert_eq!(summary.processed, 4);
+        assert_eq!(
+            first_batch_peak.load(Ordering::SeqCst),
+            1,
+            "cold-start warm-up must run Batch 1 alone before fanning out"
+        );
+        assert!(
+            post_warmup_peak.load(Ordering::SeqCst) >= 2,
+            "post-warmup batches must fan out concurrently, got {}",
+            post_warmup_peak.load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn sqlite_wal_concurrent_batch_commits_have_zero_busy_errors_and_preserve_pinned() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let specs = [
+            ("p1", "/tmp/ws-1"),
+            ("p2", "/tmp/ws-2"),
+            ("p3", "/tmp/ws-3"),
+            ("p4", "/tmp/ws-4"),
+            ("p5", "/tmp/ws-5"),
+            ("p6", "/tmp/ws-6"),
+            ("p7", "/tmp/ws-7"),
+            ("p8", "/tmp/ws-8"),
+        ];
+        let (db_path, roots) = seed_codex_test_sessions(dir.path(), &specs);
+        let pinned_id = {
+            let mut store = crate::db::Store::open(&db_path).unwrap();
+            crate::ingest::scan_all_harnesses(&mut store, &roots).unwrap();
+            let pid = store.create_line("Immutable Pinned").unwrap();
+            store
+                .update_session(
+                    "codex:p1",
+                    &crate::model::LineIdUpdate::Set(pid.clone()),
+                    None,
+                )
+                .unwrap();
+            pid
+        };
+
+        let mut handles = Vec::new();
+        for group in 0..4 {
+            let path = db_path.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut store = crate::db::Store::open(&path).unwrap();
+                let s1 = format!("codex:p{}", group * 2 + 1);
+                let s2 = format!("codex:p{}", group * 2 + 2);
+                let writes = vec![
+                    SessionDigestWrite {
+                        session_id: s1,
+                        step_count: 6,
+                        slice_hash: "h1".to_string(),
+                        title: format!("Digest {}a", group + 1),
+                        stopped_at: "Done".to_string(),
+                        left_open: String::new(),
+                        suggested_line: "Concurrent Target".to_string(),
+                        is_one_off: false,
+                    },
+                    SessionDigestWrite {
+                        session_id: s2,
+                        step_count: 6,
+                        slice_hash: "h1".to_string(),
+                        title: format!("Digest {}b", group + 1),
+                        stopped_at: "Done".to_string(),
+                        left_open: String::new(),
+                        suggested_line: "Concurrent Target".to_string(),
+                        is_one_off: false,
+                    },
+                ];
+                store.apply_session_digests_batch(&writes)
+            }));
+        }
+
+        for h in handles {
+            h.join()
+                .expect("worker thread panicked")
+                .expect("concurrent WAL batch commit must not return SQLITE_BUSY");
+        }
+
+        let store = crate::db::Store::open(&db_path).unwrap();
+        let plane = store.build_plane_response(7, Local::now()).unwrap();
+        let pinned_line = plane
+            .lines
+            .iter()
+            .find(|l| l.id == pinned_id)
+            .expect("pinned line present");
+        assert_eq!(pinned_line.sessions.len(), 1);
+        assert_eq!(pinned_line.sessions[0].id, "codex:p1");
+        assert_eq!(pinned_line.sessions[0].title, "Digest 1a");
+
+        let target_lines: Vec<_> = plane
+            .lines
+            .iter()
+            .filter(|l| l.name == "Concurrent Target")
+            .collect();
+        assert_eq!(target_lines.len(), 1);
+        assert_eq!(target_lines[0].sessions.len(), 7);
+    }
+
+    #[tokio::test]
+    async fn http_retry_decides_before_body_read_and_preserves_bounded_jitter_with_retry_after() {
+        use std::collections::HashSet;
+        use std::sync::atomic::AtomicUsize;
+
+        use axum::Router;
+        use axum::http::{StatusCode, header};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let fixed_now = DateTime::parse_from_rfc3339("2026-11-25T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        // 1. Parse both RFC 9110 Retry-After formats (delay-seconds + HTTP-date).
+        assert_eq!(parse_retry_after_ms("0", fixed_now), Some(0));
+        assert_eq!(parse_retry_after_ms("2", fixed_now), Some(2_000));
+        assert_eq!(
+            parse_retry_after_ms("Wed, 25 Nov 2026 07:00:03 GMT", fixed_now),
+            Some(3_000)
+        );
+        assert_eq!(
+            parse_retry_after_ms("Wed, 25 Nov 2026 06:59:55 GMT", fixed_now),
+            Some(0)
+        );
+        assert_eq!(
+            parse_retry_after_ms("Wednesday, 25-Nov-26 07:00:04 GMT", fixed_now),
+            Some(4_000)
+        );
+        assert_eq!(
+            parse_retry_after_ms("Wed Nov 25 07:00:05 2026", fixed_now),
+            Some(5_000)
+        );
+        assert_eq!(parse_retry_after_ms("not-a-date", fixed_now), None);
+
+        // 2. Verify bounded jitter is preserved for both delay-seconds and HTTP-date within budget,
+        //    and over-budget Retry-After (both formats) skips automatic retry (`None`).
+        let jitter_span = API_RETRY_BASE_DELAY_MS / 2;
+        let mut samples_1s = HashSet::new();
+        let mut samples_http_date = HashSet::new();
+        for _ in 0..12 {
+            let d1 = compute_retry_backoff_ms(0, Some("1"), fixed_now)
+                .expect("1s Retry-After is within budget");
+            assert!(
+                (1_000..=1_000 + jitter_span).contains(&d1),
+                "expected 1s Retry-After + bounded jitter, got {d1}"
+            );
+            samples_1s.insert(d1);
+
+            let dd = compute_retry_backoff_ms(0, Some("Wed, 25 Nov 2026 07:00:02 GMT"), fixed_now)
+                .expect("2s HTTP-date Retry-After is within budget");
+            assert!(
+                (2_000..=2_000 + jitter_span).contains(&dd),
+                "expected 2s HTTP-date Retry-After + bounded jitter, got {dd}"
+            );
+            samples_http_date.insert(dd);
+        }
+        assert!(
+            samples_1s.len() > 1,
+            "Retry-After 1s must preserve jitter variance across calls, got {samples_1s:?}"
+        );
+        assert!(
+            samples_http_date.len() > 1,
+            "HTTP-date Retry-After must preserve jitter variance across calls, got {samples_http_date:?}"
+        );
+
+        // Over-budget delay-seconds and HTTP-date MUST skip automatic retry (`None`).
+        assert_eq!(compute_retry_backoff_ms(0, Some("60"), fixed_now), None);
+        assert_eq!(
+            compute_retry_backoff_ms(0, Some("Wed, 25 Nov 2026 07:01:00 GMT"), fixed_now),
+            None
+        );
+        // Exact budget boundary (`10s`) stays allowed without exceeding `API_RETRY_MAX_DELAY_MS`.
+        assert_eq!(
+            compute_retry_backoff_ms(0, Some("10"), fixed_now),
+            Some(API_RETRY_MAX_DELAY_MS)
+        );
+
+        // 3. Verify live HTTP 429 with over-budget Retry-After skips automatic retry (1 attempt only).
+        let over_budget_calls = Arc::new(AtomicUsize::new(0));
+        let ob_ref = over_budget_calls.clone();
+        let ob_router = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let c = ob_ref.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [(header::RETRY_AFTER, "60")],
+                        "quota window resets in 60s",
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        let ob_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ob_addr = ob_listener.local_addr().unwrap();
+        let ob_server = tokio::spawn(async move {
+            let _ = axum::serve(ob_listener, ob_router).await;
+        });
+        let ob_settings = AppSettings {
+            processor_configured: true,
+            processor_mode: "api".to_string(),
+            api_provider: "openai".to_string(),
+            api_base_url: format!("http://{ob_addr}"),
+            api_model: "gpt-4o-mini".to_string(),
+            api_key: "test-key".to_string(),
+            ..AppSettings::default()
+        };
+        let client = build_shared_http_client();
+        let ob_out = TEST_RETRY_BASE_DELAY_MS_OVERRIDE
+            .scope(Some(5), async {
+                run_api_prompt("ping", &ob_settings, &client).await
+            })
+            .await
+            .unwrap();
+        ob_server.abort();
+        assert_eq!(
+            over_budget_calls.load(Ordering::SeqCst),
+            1,
+            "Retry-After exceeding retry budget must skip automatic retry"
+        );
+        assert!(
+            ob_out.reply.is_err(),
+            "skipped over-budget 429 must surface as error"
+        );
+
+        // 4. Verify truncated/broken 503 response body STILL retries because status is checked BEFORE body read.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_ref = attempts.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut req_buf = [0_u8; 2048];
+                let _ = socket.read(&mut req_buf).await;
+                if attempts_ref.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // Advertise 4096-byte body on 503 and abruptly close socket mid-body!
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 4096\r\nConnection: close\r\n\r\ntruncated",
+                        )
+                        .await;
+                    let _ = socket.shutdown().await;
+                } else {
+                    let body = r#"{"choices":[{"message":{"content":"{\"ok\":true}"}}],"usage":{"prompt_tokens":50,"completion_tokens":10}}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                }
+            }
+        });
+
+        let settings = AppSettings {
+            processor_configured: true,
+            processor_mode: "api".to_string(),
+            api_provider: "openai".to_string(),
+            api_base_url: format!("http://{addr}"),
+            api_model: "gpt-4o-mini".to_string(),
+            api_key: "test-key".to_string(),
+            ..AppSettings::default()
+        };
+        let out = TEST_RETRY_BASE_DELAY_MS_OVERRIDE
+            .scope(Some(5), async {
+                run_api_prompt("ping", &settings, &client).await
+            })
+            .await
+            .unwrap();
+        server_task.abort();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(out.reply.unwrap(), r#"{"ok":true}"#);
+    }
+
+    #[tokio::test]
+    async fn scoped_stop_targets_single_run_and_preserves_pre_registration_intent() {
+        use std::sync::atomic::AtomicUsize;
+
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tempfile::TempDir;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_ref = calls.clone();
+        let mock_api = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let c = calls_ref.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {
+                                "content": "{\"title\":\"Scoped OK\",\"stoppedAt\":\"Done\",\"leftOpen\":\"\",\"suggestedLine\":\"Scoped Line\",\"isOneOff\":false}"
+                            }
+                        }],
+                        "usage": { "prompt_tokens": 100, "completion_tokens": 20 }
+                    }))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_api).await;
+        });
+
+        let dir = TempDir::new().unwrap();
+        let specs = [
+            ("s1", "/tmp/ws-1"),
+            ("s2", "/tmp/ws-2"),
+            ("s3", "/tmp/ws-3"),
+            ("s4", "/tmp/ws-4"),
+        ];
+        let (db_path, roots) = seed_codex_test_sessions(dir.path(), &specs);
+        {
+            let mut store = crate::db::Store::open(&db_path).unwrap();
+            crate::ingest::scan_all_harnesses(&mut store, &roots).unwrap();
+            store.create_line("Seed").unwrap();
+            let settings = AppSettings {
+                processor_configured: true,
+                processor_mode: "api".to_string(),
+                api_provider: "openai".to_string(),
+                api_base_url: format!("http://{addr}"),
+                api_model: "gpt-4o-mini".to_string(),
+                api_key: "test-key".to_string(),
+                sync_batch_limit: 1,
+                sync_concurrency: 1,
+                ..AppSettings::default()
+            };
+            store.save_settings(&settings).unwrap();
+        }
+
+        let state = AppState::new(db_path, roots);
+
+        // Part 0: Invalid runIds and duplicate active registrations are rejected cleanly.
+        let overlong = "a".repeat(129);
+        for bad in [
+            "",
+            "   ",
+            "__anon_sync_1",
+            "bad id",
+            "a/b",
+            overlong.as_str(),
+        ] {
+            assert!(
+                state.prepare_sync_drain(Some(bad)).is_err(),
+                "prepare_sync_drain must reject invalid runId `{bad}`"
+            );
+            assert!(
+                state.request_sync_drain_for(Some(bad)).is_err(),
+                "request_sync_drain_for must reject invalid runId `{bad}`"
+            );
+        }
+        let held_flag = state.prepare_sync_drain(Some("dup-check")).unwrap();
+        assert!(
+            state.prepare_sync_drain(Some("dup-check")).is_err(),
+            "duplicate active runId must be rejected"
+        );
+        // Invalid Stop must not affect the held active run.
+        assert!(state.request_sync_drain_for(Some("")).is_err());
+        assert!(!held_flag.load(Ordering::Acquire));
+        drop(held_flag);
+        // Once dropped, the runId can be cleanly reused.
+        assert!(state.prepare_sync_drain(Some("dup-check")).is_ok());
+
+        // Part A: Stop arrives BEFORE the stream registers (e.g. during scan) — intent is preserved.
+        assert!(
+            state
+                .request_sync_drain_for(Some("early-stop-run"))
+                .unwrap()
+        );
+        let pre_flag = state.prepare_sync_drain(Some("early-stop-run")).unwrap();
+        let mut rx_early = spawn_sync_stream_with_drain(
+            state.clone(),
+            SyncScope {
+                days: 7,
+                anchor_date: None,
+                harness: None,
+            },
+            false,
+            None,
+            pre_flag,
+        );
+        let mut early_summary = None;
+        while let Some(evt) = rx_early.recv().await {
+            if let SyncStreamEvent::Complete { summary, .. } = evt {
+                early_summary = Some(summary);
+            }
+        }
+        let early_summary = early_summary.expect("expected Complete on pre-stopped run");
+        assert_eq!(early_summary.processed, 0);
+        assert_eq!(early_summary.skipped, 4);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // Part B: Two concurrent streams (`run-a` and `run-b`) — stopping `run-a` must NOT stop `run-b`.
+        let flag_a = state.prepare_sync_drain(Some("run-a")).unwrap();
+        let flag_b = state.prepare_sync_drain(Some("run-b")).unwrap();
+        let mut rx_a = spawn_sync_stream_with_drain(
+            state.clone(),
+            SyncScope {
+                days: 7,
+                anchor_date: None,
+                harness: None,
+            },
+            true,
+            Some(3),
+            flag_a,
+        );
+        let mut rx_b = spawn_sync_stream_with_drain(
+            state.clone(),
+            SyncScope {
+                days: 7,
+                anchor_date: None,
+                harness: None,
+            },
+            true,
+            Some(3),
+            flag_b,
+        );
+
+        let task_a = tokio::spawn(async move {
+            let mut stopped = false;
+            let mut summary = None;
+            while let Some(evt) = rx_a.recv().await {
+                match evt {
+                    SyncStreamEvent::BatchStart { .. } if !stopped => {
+                        stopped = true;
+                        let _ = state.request_sync_drain_for(Some("run-a"));
+                    }
+                    SyncStreamEvent::Complete { summary: s, .. } => summary = Some(s),
+                    _ => {}
+                }
+            }
+            summary
+        });
+
+        let task_b = tokio::spawn(async move {
+            let mut summary = None;
+            while let Some(evt) = rx_b.recv().await {
+                if let SyncStreamEvent::Complete { summary: s, .. } = evt {
+                    summary = Some(s);
+                }
+            }
+            summary
+        });
+
+        let sum_a = task_a.await.unwrap().expect("run-a Complete");
+        let sum_b = task_b.await.unwrap().expect("run-b Complete");
+        server_task.abort();
+
+        assert_eq!(sum_a.processed, 1, "run-a should drain after 1 batch");
+        assert_eq!(sum_a.skipped, 2, "run-a should skip remaining 2 batches");
+        assert_eq!(
+            sum_b.processed, 3,
+            "run-b must complete unaffected when run-a is stopped"
+        );
+        assert_eq!(sum_b.skipped, 0);
     }
 }

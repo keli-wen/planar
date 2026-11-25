@@ -30,6 +30,12 @@ pub const MIN_BURST_MS: i64 = 60 * 1000;
 pub const SYNC_BATCH_LIMIT_MIN: usize = 1;
 /// Maximum number of sessions allowed per `Sync` batch.
 pub const SYNC_BATCH_LIMIT_MAX: usize = 50;
+/// Minimum number of concurrent `Sync` batches allowed in flight.
+pub const SYNC_CONCURRENCY_MIN: usize = 1;
+/// Maximum number of concurrent `Sync` batches allowed in flight.
+pub const SYNC_CONCURRENCY_MAX: usize = 16;
+/// Sensible concurrency cap applied in local CLI subprocess mode to avoid overloading local CLIs.
+pub const SYNC_CLI_CONCURRENCY_CAP: usize = 2;
 
 /// Minimum user inputs threshold for multi-turn summarization.
 pub const FEWEST_USER_INPUTS_MIN: u32 = 1;
@@ -69,6 +75,12 @@ pub const LINE_PRIORITY_MAX: i64 = 4;
 pub const CLI_TIMEOUT_SECS: u64 = 120;
 /// Timeout in seconds for a single direct HTTP LLM API request.
 pub const API_TIMEOUT_SECS: u64 = 90;
+/// Maximum retry attempts for transient HTTP `429` / `503` LLM API responses.
+pub const API_TRANSIENT_MAX_RETRIES: usize = 2;
+/// Base delay in milliseconds for exponential backoff on transient HTTP `429` / `503` responses.
+pub const API_RETRY_BASE_DELAY_MS: u64 = 500;
+/// Maximum `Retry-After` sleep duration in milliseconds honored for transient HTTP responses.
+pub const API_RETRY_MAX_DELAY_MS: u64 = 10_000;
 /// Heartbeat interval in seconds for streaming NDJSON `Sync` responses.
 pub const STREAM_HEARTBEAT_SECS: u64 = 3;
 /// Approximate character ceiling for one multi-session `Sync` batch prompt.
@@ -142,6 +154,7 @@ struct DefaultSettingsDef {
     api_model: String,
     api_key: String,
     sync_batch_limit: usize,
+    sync_concurrency: usize,
     enabled_harnesses: EnabledHarnessesDef,
     harness_paths: HarnessPathOverridesDef,
 }
@@ -273,6 +286,7 @@ pub fn default_settings() -> AppSettings {
         api_model: default_api_model_for_provider(&src.api_provider),
         api_key: src.api_key.clone(),
         sync_batch_limit: src.sync_batch_limit,
+        sync_concurrency: src.sync_concurrency,
         enabled_harnesses: default_enabled_harnesses(),
         harness_paths: default_harness_paths(),
     }
@@ -433,12 +447,15 @@ mod tests {
         assert_eq!(serialized, expected);
 
         assert!((SYNC_BATCH_LIMIT_MIN..=SYNC_BATCH_LIMIT_MAX).contains(&settings.sync_batch_limit));
+        assert!((SYNC_CONCURRENCY_MIN..=SYNC_CONCURRENCY_MAX).contains(&settings.sync_concurrency));
         assert!(settings.fewest_user_inputs >= FEWEST_USER_INPUTS_MIN);
         assert!(settings.opening_steps >= SLICER_STEPS_MIN);
         assert!(settings.closing_steps >= SLICER_STEPS_MIN);
         assert!(settings.sessions_shown_per_line >= SESSIONS_SHOWN_PER_LINE_MIN);
         const {
             assert!(SYNC_BATCH_LIMIT_MIN <= SYNC_BATCH_LIMIT_MAX);
+            assert!(SYNC_CONCURRENCY_MIN <= SYNC_CLI_CONCURRENCY_CAP);
+            assert!(SYNC_CLI_CONCURRENCY_CAP <= SYNC_CONCURRENCY_MAX);
         }
     }
 
