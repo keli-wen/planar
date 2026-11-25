@@ -27,7 +27,7 @@ Run local surfaces:
 
 ## 2. How to Orient Yourself (Progressive Disclosure)
 
-1. **Coding Agents**: Start at [`AGENTS.md`](AGENTS.md) (`CLAUDE.md` is a symlink) and `.agents/skills/planar-dev/SKILL.md`.
+1. **Coding Agents**: Start at [`AGENTS.md`](AGENTS.md) (`CLAUDE.md` is a symlink) and [`WORKFLOW.md`](WORKFLOW.md).
 2. **All Contributors**: Read [`contexts/CONTEXT_MAP.md`](contexts/CONTEXT_MAP.md) to jump directly to the relevant design, architecture, UI, or release doc — never guess invariants.
 3. **Rust Contributors**: Follow workspace lints (`unsafe_code = "forbid"`, `clippy::pedantic`, `unwrap_used = "deny"`) and repo-local references in `.agents/skills/rust-best-practices/` and `.agents/skills/rust-async-patterns/`.
 4. **Frontend (`./ui`) Contributors**: Planar intentionally uses **zero-dependency vanilla HTML/CSS/ESM** (no React or bundler — see [`contexts/engineering/ui-zero-fork.md`](contexts/engineering/ui-zero-fork.md)).
@@ -53,7 +53,7 @@ Planar treats GitHub labels as **machine-readable routing metadata** for both hu
 | Axis | Labels | Purpose & Agent Routing Semantics |
 | :--- | :--- | :--- |
 | **Type** *(pick 1)* | `bug`, `enhancement`, `perf`, `refactor`, `rfc`, `documentation` | Classifies intent. Use `rfc` for cross-cutting T3 designs before code; `perf` for latency/concurrency/memory work; `refactor` for behavior-preserving cleanup or SSOT consolidation. |
-| **Surface** *(pick 1+)* | `area:core`, `area:cli`, `area:ui`, `area:app`, `area:mcp`, `area:harness`, `area:context` | Maps 1:1 to [`AGENTS.md`](AGENTS.md) directory contracts so a clean-session agent loads only the matching `contexts/` doc and skill (e.g., `area:ui` → [`DESIGN.md`](DESIGN.md) + `ui-zero-fork.md`; `area:harness` → `add-harness-or-provider.md`). |
+| **Surface** *(pick 1+)* | `area:core`, `area:cli`, `area:ui`, `area:app`, `area:mcp`, `area:harness`, `area:context` | Maps 1:1 to [`AGENTS.md`](AGENTS.md) directory contracts so a clean-session agent loads only the matching `contexts/` doc and skill (e.g., `area:ui` → [`DESIGN.md`](DESIGN.md) + `ui-zero-fork.md`; `area:harness` → [`add-harness-or-provider.md`](contexts/engineering/add-harness-or-provider.md)). |
 | **Review Tier** *(pick 1)* | `tier:T0`, `tier:T1`, `tier:T2`, `tier:T3` | Mirrors [`REVIEW.md`](REVIEW.md) blast-radius policy (**Rule of Highest Tier**). Determines mechanical gates (`check:hygiene` vs `pre-pr`) and review mode (self-check, fresh-context, adversarial, or two-gate RFC). |
 | **Agent Dispatch** *(pick 1)* | `agent:ready`, `agent:needs-spec`, `agent:human-gate` | Controls autonomous pickup:<br>• `agent:ready`: Contexts-first handoff complete (`Source Context`, scope boundaries, verification plan) — safe for a fresh coding agent to claim.<br>• `agent:needs-spec`: Missing context links, repro steps, or open design choices — refine before dispatching an agent.<br>• `agent:human-gate`: Blocked on human maintainer decision, T3 Design Gate, visual sign-off, or credentials/release action. |
 | **Priority** *(optional)* | `P0`, `P1`, `P2` | Matches [`REVIEW.md`](REVIEW.md) severity: `P0` (blocker / data loss / invariant break), `P1` (high-impact UX/speed pain point or active milestone), `P2` (incremental polish). |
@@ -62,7 +62,7 @@ Planar treats GitHub labels as **machine-readable routing metadata** for both hu
 ### Labeling Tips for Humans & Coding Agents
 
 1. **Follow the Rule of Highest Tier**: If an issue touches both `./ui` (`T1`) and `crates/planar-core/src/processor.rs` (`T2`), tag both `area:ui` and `area:core`, and assign `tier:T2`.
-2. **Never mark half-baked issues `agent:ready`**: Only apply `agent:ready` once `Source Context`, concrete acceptance criteria, out-of-scope boundaries, and exact verification commands are filled in (see `.agents/skills/planar-dev/references/issue-filing.md`).
+2. **Never mark half-baked issues `agent:ready`**: Only apply `agent:ready` once `Source Context`, concrete acceptance criteria, out-of-scope boundaries, and exact verification commands are filled in (see [`WORKFLOW.md` §1](WORKFLOW.md#1-issue-first-intake--filing)).
 3. **Flip dispatch state on transitions**: When an RFC is awaiting Design Gate approval, tag `rfc` + `tier:T3` + `agent:human-gate`; once approved with a crisp spec, flip to `agent:ready`.
 4. **CLI example** (after writing the draft marker via `scripts/hooks/pre_tool_use_issue_guard.py --write-marker`):
    ```bash

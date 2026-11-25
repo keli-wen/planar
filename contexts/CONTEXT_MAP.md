@@ -16,7 +16,8 @@ contexts/
 ├── engineering/                             ← Repo-wide engineering workflows, guardrails, and subsystem contracts
 │   ├── version-control-and-release.md       ← Branching, commit prefixes, SemVer lockstep, release checklist, git history hygiene
 │   ├── hooks-and-gates.md                   ← Dual-layer guardrails (.githooks/ + Agent PreToolUse hooks + CI + hygiene checks)
-│   └── ui-zero-fork.md                      ← Zero-dependency vanilla HTML/CSS/ESM frontend rules (and why Planar skips React)
+│   ├── ui-zero-fork.md                      ← Zero-dependency vanilla HTML/CSS/ESM frontend rules, preview & screenshot capture
+│   └── add-harness-or-provider.md           ← Runbook for adding a read-only harness ingestor or direct LLM API provider
 ```
 
 ## Placement Rules (Check Before Writing)
@@ -29,9 +30,10 @@ contexts/
 | Git, commits, branching, SemVer, release & packaging SOPs | `contexts/engineering/version-control-and-release.md` | Update in place |
 | Lints, git hooks, Agent `PreToolUse` hooks, CI gates | `contexts/engineering/hooks-and-gates.md` | Update in place |
 | Subsystem guides & architectural trade-offs (e.g. UI, ingestors, MCP) | `contexts/engineering/<topic>.md` | Lowercase kebab-case |
-| Reusable coding-agent SOPs & step-by-step runbooks | `.agents/skills/planar-dev/` | Keep rules in `contexts/`, workflows in skills |
+| Issue filing, delivery order, verification tiers & auth gates | `WORKFLOW.md` | Update in place (keep rules in `contexts/` & `REVIEW.md`) |
+| Independent judge rubrics (review, design, simplification) | `REVIEW.md`, `DESIGN.md`, `SIMPLIFY.md` | Repo root; orthogonal evaluator rubrics only |
 | End-user runtime Agent Skill (shipped with Planar) | `skills/planar/SKILL.md` | Mirrors `planar` CLI & read-only MCP surface |
-| GitHub-required root community/policy/design files | Repo root (`README.md`, `README.zh-CN.md`, `AGENTS.md`, `CLAUDE.md`, `WORKFLOW.md`, `DESIGN.md`, `CONTRIBUTING.md`, `REVIEW.md`, `LICENSE`) | Never duplicate `contexts/` details here — link instead |
+| GitHub-required root community/policy/entry files | Repo root (`README.md`, `README.zh-CN.md`, `AGENTS.md`, `CLAUDE.md`, `WORKFLOW.md`, `DESIGN.md`, `REVIEW.md`, `SIMPLIFY.md`, `CONTRIBUTING.md`, `LICENSE`) | Never duplicate `contexts/` details here — link instead |
 
 ## Durable Context Rules
 

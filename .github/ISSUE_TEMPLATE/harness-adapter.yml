@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         ## New Harness Ingestor / API Provider
-        Follow `.agents/skills/planar-dev/references/add-harness-or-provider.md`. All harness ingestors MUST remain strictly **read-only** on source transcript logs.
+        Follow `contexts/engineering/add-harness-or-provider.md`. All harness ingestors MUST remain strictly **read-only** on source transcript logs.
 
   - type: dropdown
     id: kind

@@ -86,7 +86,7 @@ Planar is structured so any coding agent (**Claude Code**, **Codex**, **Antigrav
 | **Agent Router** | [`AGENTS.md`](./AGENTS.md) (`CLAUDE.md` symlink) | Compact L0 entry point: invariants, directory boundaries, verification commands |
 | **Design System** | [`DESIGN.md`](./DESIGN.md) | Unified visual identity, Light/Dark tokens, typography, `bandPath` geometry, and UI QA checklist |
 | **Durable Contexts** | [`contexts/CONTEXT_MAP.md`](./contexts/CONTEXT_MAP.md) | Single home for product design, architecture, release/versioning, UI contract, and hooks |
-| **Repo Contributor Skills** | [`.agents/skills/planar-dev/SKILL.md`](./.agents/skills/planar-dev/SKILL.md) | Contributor SOPs (`planar-dev` + version-locked Rust skills; symlinked at `.claude/skills`) |
+| **Agentic Workflow & Simplifier** | [`WORKFLOW.md`](./WORKFLOW.md) & [`SIMPLIFY.md`](./SIMPLIFY.md) | Issue-first delivery loop, verification ladder, auth gates, and Occam's Razor diff rubric (plus vendored Rust skills under `.agents/skills/`, symlinked at `.claude/skills`) |
 | **Risk-Tiered Review** | [`REVIEW.md`](./REVIEW.md) & [`CONTRIBUTING.md`](./CONTRIBUTING.md) | `T0`–`T3` review tiers by blast radius, invariant checklists, and contribution guide |
 | **Mechanical Guardrails** | [`.githooks/`](./.githooks) & [`scripts/hooks/`](./scripts/hooks) | Universal Git hooks, Claude/Codex `PreToolUse` PR & Issue guards, and `npm run verify` |
 | **Shipped Agent Skill** | [`skills/planar/SKILL.md`](./skills/planar/SKILL.md) | End-user progressive-disclosure protocol (`L0 → batch L1 → bounded L2`) |

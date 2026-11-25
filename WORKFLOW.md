@@ -2,7 +2,7 @@
 
 > Orthogonal orchestration contract for `keli-wen/planar`: defines issue intake, episode delivery order, conflict-domain parallelism, verification target assignment, and human authorization gates.
 >
-> **ADLC contract separation**: [`AGENTS.md`](AGENTS.md) holds always-on identity, invariants, and scenario routing; `WORKFLOW.md` governs *how work moves*; independent judge rubrics live in [`REVIEW.md`](REVIEW.md), [`DESIGN.md`](DESIGN.md), and [`.agents/skills/planar-dev/references/simplify.md`](.agents/skills/planar-dev/references/simplify.md).
+> **ADLC contract separation**: [`AGENTS.md`](AGENTS.md) holds always-on identity, invariants, and scenario routing; `WORKFLOW.md` governs *how work moves*; independent judge rubrics live in [`REVIEW.md`](REVIEW.md), [`DESIGN.md`](DESIGN.md), and [`SIMPLIFY.md`](SIMPLIFY.md).
 
 ---
 
@@ -10,14 +10,30 @@
 
 Every non-trivial bug fix, refactor, performance change, or feature starts as a **contexts-first GitHub Issue** that a clean-session agent can execute without chat history:
 
-1. **Required handoff sections** (see [`.agents/skills/planar-dev/references/issue-filing.md`](.agents/skills/planar-dev/references/issue-filing.md)):
+1. **Choose the matching form** under `.github/ISSUE_TEMPLATE/`:
+
+   | Template | Default Labels | When to use |
+   | :--- | :--- | :--- |
+   | `bug.yml` | `bug` | Unexpected behavior, crash, wrong active time, parser bug, UI regression |
+   | `feature.yml` | `enhancement` | New user-facing capability or workflow improvement |
+   | `harness-adapter.yml` | `enhancement`, `area:harness` | New coding-agent harness ingestor or LLM API provider |
+   | `context-update.yml` | `documentation`, `area:context` | Updating `contexts/` or evolving workflows, rubrics, or hooks |
+
+2. **Required handoff sections**:
    - `Source Context` (exact `contexts/` files, code paths, and related issues/PRs)
    - `Objective & Scope Boundaries` (explicit **In Scope** and **Out of Scope**)
    - `Suggested Review Tier` (`T0`–`T3` per [`REVIEW.md`](REVIEW.md))
    - `Context Action & Target Context` (`Update existing` / `Create new` / `No context impact`)
    - `Verification & Done Criteria` (concrete runnable commands and assertions)
-2. **Agent-native labels** (4 core axes per [`CONTRIBUTING.md`](CONTRIBUTING.md)): `1 Type` + `1+ Surface (area:*)` + `1 Review Tier (tier:T*)` + `1 Dispatch State (agent:ready | agent:needs-spec | agent:human-gate)` (+ optional `P0`–`P2`).
-3. **Mechanical filing guard**: Write the draft body to a temporary file, record the check marker (`python3 scripts/hooks/pre_tool_use_issue_guard.py --write-marker --title "..." --body-file <tmp>`), run `gh issue create`, and remove the temporary file.
+3. **Agent-native labels** (4 core axes per [`CONTRIBUTING.md`](CONTRIBUTING.md)): `1 Type` + `1+ Surface (area:*)` + `1 Review Tier (tier:T*)` + `1 Dispatch State (agent:ready | agent:needs-spec | agent:human-gate)` (+ optional `P0`–`P2`).
+4. **Mechanical filing guard**: Write the draft body to a temporary file, record the `(title, body)` marker, create the issue, and delete the temp file (if `gh` is unavailable or only a draft was requested, return the Markdown draft in chat):
+   ```bash
+   python3 scripts/hooks/pre_tool_use_issue_guard.py --write-marker \
+     --title "<issue title>" \
+     --body-file /tmp/issue-body.md
+   gh issue create --title "<issue title>" --body-file /tmp/issue-body.md --label "..."
+   rm -f /tmp/issue-body.md
+   ```
 
 ---
 
@@ -25,13 +41,14 @@ Every non-trivial bug fix, refactor, performance change, or feature starts as a 
 
 Follow one closed loop per issue (`A → B → A'`):
 
-1. **Intake**: Read the issue (`gh issue view <n>`) and load only the `contexts/` docs and skills referenced in `Source Context`.
+1. **Intake**: Read the issue (`gh issue view <n>`) and load only the `contexts/` docs and skills referenced in `Source Context` (for Rust edits, pair with `.agents/skills/rust-best-practices/SKILL.md` and `.agents/skills/rust-async-patterns/SKILL.md`).
 2. **Isolate**: Work on a dedicated feature branch (`<prefix>/<short-kebab-topic>`) or sibling `git worktree` — never commit feature work directly to `master`.
 3. **Implement & Fast Inner Loop**: Make tightly scoped changes, add offline unit tests, update `contexts/` if required, and iterate with targeted checks (§4).
 4. **Independent Review ([`REVIEW.md`](REVIEW.md))**: Run the tier-appropriate review (`T1` structured single-agent, `T2` fresh-context adversarial, `T3` pre-code Design Gate + `T2`).
-5. **Simplify Pass ([`simplify.md`](.agents/skills/planar-dev/references/simplify.md))**: Run a behavior-preserving Occam's Razor pass to trim dead state, redundant checks, and wrapper bloat before publishing.
-6. **Outer Pre-PR Gate**: Separate `ctx:` commits from code commits when practical, then run `npm run pre-pr` on the final `HEAD` (writes the `.planar-agent/pre-pr-check-pass.json` marker).
-7. **Publish PR + Deterministic Telemetry**: Push the branch (`.githooks/pre-push` enforces `npm run verify`), open the PR with [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md), and attach machine-generated workflow traces *deterministically after PR creation* rather than asking an LLM to transcribe Mermaid/tables.
+5. **Simplify Pass ([`SIMPLIFY.md`](SIMPLIFY.md))**: Run a behavior-preserving Occam's Razor pass to trim dead state, redundant checks, and wrapper bloat before publishing.
+6. **Outer Pre-PR Gate**: Separate `ctx:` commits from code commits when practical, then run `npm run pre-pr` on the final `HEAD` (writes `.planar-agent/pre-pr-check-pass.json` bound to `git rev-parse HEAD`, unblocking the `PreToolUse` guard on `gh pr create`).
+   > **HEAD staleness**: Even a 1-line commit after `npm run pre-pr` advances `HEAD` and causes the `PreToolUse` guard to block `gh pr create` until you re-run `npm run pre-pr`.
+7. **Publish PR + Deterministic Telemetry**: Push the branch (`.githooks/pre-push` enforces `npm run verify`), open the PR using Planar's commit-prefix title grammar and [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) (fill in **Why**, **What Changed**, **Review Tier**, **Invariant & Context Impact**, **Verification Proof**, and `Closes #N` / `Refs #N`; drop unused sections), and attach machine-generated workflow traces *deterministically after PR creation* rather than asking an LLM to transcribe Mermaid/tables.
 8. **CI Green, Human Merge & Return to Theme**: Wait for all 3 GitHub CI jobs, merge upon human sign-off, remove temporary worktrees/branches, and distill durable lessons back into `contexts/`.
 
 **Executable reference flow**: [`.cospan/flows/planar-dev/flow.mjs`](.cospan/flows/planar-dev/flow.mjs) automates Steps 1–7 with Progress-First resilience (halt early *only* on true P0 `blocked`; carry non-blocking residual review notes transparently to the PR body; attach full workflow traces post-PR via best-effort JS).
@@ -74,6 +91,6 @@ Agents may iterate, run offline tests, open draft/review PRs, and file issues au
 
 1. Merging Pull Requests into `master` (mandatory for all `tier:T2` and `tier:T3` changes).
 2. Starting implementation on a `tier:T3` architectural / cross-crate RFC (Design Gate first).
-3. Pushing version bumps, release tags (`vX.Y.Z`), or publishing GitHub Releases ([`version-control-and-release.md`](contexts/engineering/version-control-and-release.md)).
+3. Creating release commits or local annotated tags (`vX.Y.Z`), pushing any version bump or release tag, or publishing GitHub Releases ([`version-control-and-release.md`](contexts/engineering/version-control-and-release.md)).
 4. Force-pushing shared branches or installing/overwriting local binaries (`/Applications/Planar.app`, `~/.cargo/bin/planar`).
 5. Modifying clean-room hygiene exclusions or bypassing `.githooks/` (`--no-verify` is forbidden).

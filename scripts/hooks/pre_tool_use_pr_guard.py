@@ -179,7 +179,7 @@ def evaluate_hook_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
     if not marker_path.is_file():
         return deny(
             f"Blocked `gh pr create`: missing pre-PR verification marker at {marker_path}. "
-            "Follow `.agents/skills/planar-dev/references/verify-and-pre-pr.md` and run "
+            "Follow `WORKFLOW.md` and run "
             "`npm run pre-pr` before creating the PR."
         )
 

@@ -17,10 +17,10 @@ Do not scan the whole repository blindly. Start at [`contexts/CONTEXT_MAP.md`](c
 | Branching, commit prefixes, SemVer lockstep & releases | [`contexts/engineering/version-control-and-release.md`](contexts/engineering/version-control-and-release.md) |
 | Git hooks, Agent `PreToolUse` guards, hygiene & CI | [`contexts/engineering/hooks-and-gates.md`](contexts/engineering/hooks-and-gates.md) |
 | Visual identity, color/type tokens, SVG geometry, UI components & design QA | [`DESIGN.md`](DESIGN.md) *(mandatory before any UI, icon, asset, or diagram edit)* |
-| Zero-fork vanilla `./ui` rules (and why Planar skips React) | [`contexts/engineering/ui-zero-fork.md`](contexts/engineering/ui-zero-fork.md) |
-| Orchestration, issue intake, parallelism, verification tiers & auth gates | [`WORKFLOW.md`](WORKFLOW.md) |
-| Tiered review rules (`T0`–`T3`) & contribution rules | [`REVIEW.md`](REVIEW.md) & [`CONTRIBUTING.md`](CONTRIBUTING.md) |
-| Contributor SOPs (verify, pre-PR, issue filing, adapters, release) | [`.agents/skills/planar-dev/SKILL.md`](.agents/skills/planar-dev/SKILL.md) |
+| Zero-fork vanilla `./ui` rules & README screenshot capture | [`contexts/engineering/ui-zero-fork.md`](contexts/engineering/ui-zero-fork.md) |
+| Adding a new harness ingestor or direct LLM API provider | [`contexts/engineering/add-harness-or-provider.md`](contexts/engineering/add-harness-or-provider.md) |
+| Orchestration, issue filing, pre-PR, parallelism & auth gates | [`WORKFLOW.md`](WORKFLOW.md) |
+| Tiered review (`T0`–`T3`), Occam's Razor simplification & contributing | [`REVIEW.md`](REVIEW.md), [`SIMPLIFY.md`](SIMPLIFY.md) & [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Rust idioms, async patterns & review rubric | `.agents/skills/rust-best-practices/SKILL.md`, `rust-async-patterns/SKILL.md`, `rust-review/SKILL.md` |
 | End-user runtime Skill (`L0 → L1 → L2` progressive disclosure) | [`skills/planar/SKILL.md`](skills/planar/SKILL.md) |
 
@@ -34,7 +34,7 @@ Do not scan the whole repository blindly. Start at [`contexts/CONTEXT_MAP.md`](c
 | `DESIGN.md` | Unified visual & UI design system (brand mark, Light/Dark tokens, `PALETTE`, typography, `bandPath` geometry, components, QA checklist) | Mandatory source of truth before touching `./ui`, `assets/`, icons, diagrams, or any new surface; keep synced with live CSS tokens. |
 | `ui/` | Framework-free vanilla HTML/CSS/ESM frontend (`Week`/`Day`/`Month` swimlanes, heatmap, `RECAP`, drag-and-drop deps, Settings, `@container` narrow sidebar) | Zero build step, zero npm runtime deps, standard `fetch('/api/*')` only. Follow [`DESIGN.md`](DESIGN.md) tokens & anti-patterns; must work identically in Tauri, `planar serve`, `npm run preview` (`?mock=1`), and IDE sidebars. |
 | `contexts/` | Single durable context root (product, design, architecture, engineering) | Register every new `.md` file in [`contexts/CONTEXT_MAP.md`](contexts/CONTEXT_MAP.md). Separate `ctx:` commits from code commits. |
-| `.agents/skills/` | Repo-local engineering skills (`planar-dev` + vendored `rust-*`, symlinked at `.claude/skills`) | Do not hand-edit vendored `rust-*` skills managed by `skills-lock.json`. |
+| `.agents/skills/` | Vendored repo-local engineering skills (`rust-*`, symlinked at `.claude/skills`) | Do not hand-edit vendored `rust-*` skills managed by `skills-lock.json`. |
 | `skills/planar/` | Shipped end-user Agent Skill (`SKILL.md`) | Stays 100% aligned with `planar_status` / `planar_line` / `planar_session` / `planar_search` MCP & CLI flags. |
 | `.githooks/` & `scripts/hooks/` | Universal Git hooks + Claude/Codex `PreToolUse` PR & Issue guards | Enable locally via `npm run hooks:install`; unit-tested by `npm run test:hooks`. |
 

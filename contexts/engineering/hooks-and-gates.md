@@ -43,11 +43,11 @@ Inspired by durable harness-engineering workflows, Planar ships lightweight, pur
 
 1. **[`scripts/hooks/pre_tool_use_pr_guard.py`](../../scripts/hooks/pre_tool_use_pr_guard.py)**:
    - Watches Bash tool invocations for `gh pr create`.
-   - Requires a valid JSON marker at `.planar-agent/pre-pr-check-pass.json` whose `head` matches the target branch/worktree's current `git rev-parse HEAD` (generated automatically by `npm run pre-pr` or the `planar-dev` pre-PR workflow).
+   - Requires a valid JSON marker at `.planar-agent/pre-pr-check-pass.json` whose `head` matches the target branch/worktree's current `git rev-parse HEAD` (generated automatically by `npm run pre-pr` per [`WORKFLOW.md`](../../WORKFLOW.md)).
    - Prevents coding agents from opening PRs with unverified diffs or stale check passes after making "one last quick tweak".
 2. **[`scripts/hooks/pre_tool_use_issue_guard.py`](../../scripts/hooks/pre_tool_use_issue_guard.py)**:
    - Watches Bash tool invocations for `gh issue create`.
-   - Requires a fresh issue-filing marker at `.planar-agent/issue-file-check-pass.json` matching the drafted title/body hash (or written during `.agents/skills/planar-dev/references/issue-filing.md`), ensuring agent-filed issues always include `contexts-first` handoff fields and a suggested Review Tier.
+   - Requires a fresh issue-filing marker at `.planar-agent/issue-file-check-pass.json` matching the drafted title/body hash (written via `--write-marker` per [`WORKFLOW.md`](../../WORKFLOW.md)), ensuring agent-filed issues always include `contexts-first` handoff fields and a suggested Review Tier.
    - Humans filing issues in the GitHub UI use `.github/ISSUE_TEMPLATE/*.yml` directly and are unaffected.
 
 All marker files live under `.planar-agent/` (gitignored) and both guards are unit-tested by `npm run test:hooks` (`python3 -m unittest discover -s scripts/hooks -p 'test_*.py'`).
@@ -59,7 +59,7 @@ All marker files live under `.planar-agent/` (gitignored) and both guards are un
 Zero-dependency Node ESM checker invoked by `npm run check:hygiene`, `.githooks/pre-commit`, and CI:
 
 1. **Privacy scan**: Fails on personal absolute paths (`/Users/<name>` other than `/Users/demo`), private identifiers, unreleased internal model codenames, or leaked API key prefixes.
-2. **Relative Markdown link check**: Fails on broken relative links in `README.md`, `README.zh-CN.md`, `AGENTS.md`, `CONTRIBUTING.md`, `REVIEW.md`, `contexts/**/*.md`, `skills/**/*.md`, and `.agents/skills/planar-dev/**/*.md`.
+2. **Relative Markdown link check**: Fails on broken relative links in `README.md`, `README.zh-CN.md`, `AGENTS.md`, `WORKFLOW.md`, `DESIGN.md`, `CONTRIBUTING.md`, `REVIEW.md`, `SIMPLIFY.md`, `contexts/**/*.md`, `skills/**/*.md`, and `.github/**/*.md`.
 3. **`CONTEXT_MAP.md` registration check**: Fails if any `.md` file exists under `contexts/` without being listed in `contexts/CONTEXT_MAP.md`.
 4. **Version lockstep check**: Fails if `Cargo.toml`, `package.json`, and `src-tauri/tauri.conf.json` disagree on version.
 5. **Dual-entry symlink check**: Confirms `CLAUDE.md -> AGENTS.md` and `.claude/skills -> ../.agents/skills` stay intact.

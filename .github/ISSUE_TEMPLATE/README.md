@@ -15,6 +15,6 @@ Planar uses **AI-friendly, contexts-first GitHub Issue Forms** so every issue do
 
 ## For Coding Agents Filing Issues via `gh issue create`
 
-Follow `.agents/skills/planar-dev/references/issue-filing.md`:
+Follow [`WORKFLOW.md` §1](../../WORKFLOW.md#1-issue-first-intake--filing):
 1. Populate `Source Context`, `Suggested Review Tier`, `Context Action`, `Target Context`, and `Verification Plan`.
 2. Write the issue draft marker (`scripts/hooks/pre_tool_use_issue_guard.py --write-marker ...`) before running `gh issue create`.

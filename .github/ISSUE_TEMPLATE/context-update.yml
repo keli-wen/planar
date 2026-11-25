@@ -27,7 +27,7 @@ body:
       label: Target Files
       placeholder: |
         - `contexts/...`
-        - `.agents/skills/planar-dev/...`
+        - `WORKFLOW.md` / `SIMPLIFY.md`
         - `REVIEW.md` / `.githooks/...`
     validations:
       required: true

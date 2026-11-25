@@ -148,9 +148,11 @@ function checkMarkdownLinks() {
     "README.md",
     "README.zh-CN.md",
     "AGENTS.md",
+    "WORKFLOW.md",
     "DESIGN.md",
     "CONTRIBUTING.md",
     "REVIEW.md",
+    "SIMPLIFY.md",
   ];
   const mdFiles = [];
   for (const file of roots) {
@@ -159,7 +161,7 @@ function checkMarkdownLinks() {
       mdFiles.push({ abs, rel: file });
     }
   }
-  for (const dir of ["contexts", "skills", ".agents/skills/planar-dev", ".github"]) {
+  for (const dir of ["contexts", "skills", ".github"]) {
     const absDir = join(ROOT, dir);
     if (!existsSync(absDir)) {
       continue;
