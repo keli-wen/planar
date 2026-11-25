@@ -21,7 +21,8 @@ use crate::env::HarnessRoots;
 use crate::error::{PlanarError, Result};
 use crate::ingest::scan_all_harnesses;
 use crate::model::{
-    AppSettings, LineIdUpdate, PlaneResponse, ProcessorTestResult, SyncStreamEvent, SyncSummaryDto,
+    AppSettings, LineIdUpdate, PlaneResponse, ProcessorTestResult, SyncEstimateDto,
+    SyncStreamEvent, SyncSummaryDto,
 };
 use crate::processor;
 
@@ -126,6 +127,24 @@ impl AppState {
         .map_err(|e| PlanarError::TaskJoin(e.to_string()))?
     }
 
+    /// Executes a strictly read-only query against an existing SQLite store without creating
+    /// directories, creating a missing database file, or running schema migrations.
+    pub(crate) async fn with_store_readonly<F, T>(&self, f: F) -> Result<Option<T>>
+    where
+        F: FnOnce(&Store) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let db_path = self.db_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let Some(store) = Store::open_readonly(&db_path)? else {
+                return Ok(None);
+            };
+            f(&store).map(Some)
+        })
+        .await
+        .map_err(|e| PlanarError::TaskJoin(e.to_string()))?
+    }
+
     pub(crate) async fn build_plane_snapshot(
         &self,
         days: usize,
@@ -212,6 +231,7 @@ fn build_api_router(state: AppState) -> Router {
         .route("/plane", get(get_plane_handler))
         .route("/scan", post(post_scan_handler))
         .route("/sync", post(post_sync_handler))
+        .route("/sync/estimate", get(get_sync_estimate_handler))
         .route("/sync/stream", post(post_sync_stream_handler))
         .route("/regroup", post(post_regroup_handler))
         .route("/processor/test", post(post_processor_test_handler))
@@ -440,6 +460,17 @@ async fn post_scan_handler(
     state.run_scan().await?;
     let plane = state.build_plane(&query).await?;
     Ok(Json(plane))
+}
+
+async fn get_sync_estimate_handler(
+    State(state): State<AppState>,
+    Query(query): Query<SyncQuery>,
+) -> ApiResult<Json<SyncEstimateDto>> {
+    let scope = query.to_scope()?;
+    let estimate =
+        processor::estimate_sync_cost(&state, query.force == Some(1), query.limit, Some(scope))
+            .await?;
+    Ok(Json(estimate))
 }
 
 async fn post_sync_handler(
@@ -932,6 +963,65 @@ mod tests {
         let (st, plane) = send_json(app.clone(), Method::GET, "/api/plane?days=7", None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(plane["unsummarized"].as_array().unwrap().len(), 2);
+
+        // Pre-flight read-only Sync cost estimate (default local CLI mode -> no fabricated API cost).
+        let db_before = fs::read(dir.path().join("planar.db")).unwrap();
+        let (est_st, cli_est) =
+            send_json(app.clone(), Method::GET, "/api/sync/estimate?days=7", None).await;
+        assert_eq!(est_st, StatusCode::OK);
+        assert_eq!(cli_est["sessionCount"], 2);
+        assert_eq!(cli_est["batchCount"], 1);
+        assert_eq!(cli_est["isLocalCli"], true);
+        assert!(cli_est["estimatedInputTokens"].as_u64().unwrap() > 0);
+        assert!(cli_est["estimatedOutputTokens"].as_u64().unwrap() > 0);
+        assert!(cli_est.get("estimatedCostUsdRange").is_none());
+        let db_after = fs::read(dir.path().join("planar.db")).unwrap();
+        assert_eq!(
+            db_before, db_after,
+            "GET /api/sync/estimate must not mutate SQLite database bytes"
+        );
+
+        // GET /api/sync/estimate on a non-existent DB must return 0 sessions without creating the DB.
+        let missing_db = dir.path().join("uncreated").join("planar.db");
+        let missing_app =
+            build_embedded_router(AppState::new(missing_db.clone(), test_roots(dir.path())));
+        let (missing_st, missing_est) =
+            send_json(missing_app, Method::GET, "/api/sync/estimate?days=7", None).await;
+        assert_eq!(missing_st, StatusCode::OK);
+        assert_eq!(missing_est["sessionCount"], 0);
+        assert!(
+            !missing_db.exists(),
+            "GET /api/sync/estimate must never create a missing SQLite database"
+        );
+
+        // Switch to direct Gemini API mode and verify pre-flight USD range is computed offline.
+        let (cfg_st, _) = send_json(
+            app.clone(),
+            Method::PUT,
+            "/api/settings",
+            Some(serde_json::json!({
+                "processorConfigured": true,
+                "processorMode": "api",
+                "apiProvider": "gemini",
+                "apiModel": "gemini-4-hydrogen"
+            })),
+        )
+        .await;
+        assert_eq!(cfg_st, StatusCode::OK);
+        let (api_est_st, api_est) =
+            send_json(app.clone(), Method::GET, "/api/sync/estimate?days=7", None).await;
+        assert_eq!(api_est_st, StatusCode::OK);
+        assert_eq!(api_est["sessionCount"], 2);
+        assert_eq!(api_est["batchCount"], 1);
+        assert_eq!(api_est["isLocalCli"], false);
+        assert_eq!(api_est["model"], "gemini-4-hydrogen");
+        assert!(api_est["estimatedThinkingTokens"].as_u64().unwrap() > 0);
+        let low = api_est["estimatedCostUsdRange"]["low"].as_f64().unwrap();
+        let high = api_est["estimatedCostUsdRange"]["high"].as_f64().unwrap();
+        assert!(
+            low > 0.0 && high >= low,
+            "expected positive USD range: {api_est}"
+        );
 
         let (st, created) = send_json(
             app.clone(),

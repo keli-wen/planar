@@ -21,3 +21,6 @@ clap.workspace = true
 planar-core = { path = "../planar-core" }
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

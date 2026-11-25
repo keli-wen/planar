@@ -9,8 +9,12 @@ use planar_core::db::{Store, SyncScope};
 use planar_core::env::{HarnessRoots, build_resume_command, default_db_path, hydrate_macos_path};
 use planar_core::ingest::scan_all_harnesses;
 use planar_core::mcp::serve_stdio;
-use planar_core::model::{ScanStats, SearchQuery, SessionFocus, SyncStreamEvent, SyncSummaryDto};
-use planar_core::processor::{regroup_discovered_lines, spawn_sync_stream};
+use planar_core::model::{
+    ScanStats, SearchQuery, SessionFocus, SyncEstimateDto, SyncStreamEvent, SyncSummaryDto,
+    SyncUsageDto,
+};
+use planar_core::pricing::{format_tokens_compact, format_usd_compact};
+use planar_core::processor::{estimate_sync_cost, regroup_discovered_lines, spawn_sync_stream};
 use planar_core::render::{
     render_l0_status, render_l1_lines, render_l2_sessions, render_search_results,
 };
@@ -125,6 +129,9 @@ enum Commands {
         /// Re-summarize eligible sessions even if an up-to-date digest already exists
         #[arg(long)]
         force: bool,
+        /// Estimate pending Sync token usage and USD cost without calling any LLM
+        #[arg(long)]
+        estimate: bool,
         /// Skip incremental trajectory scan before syncing
         #[arg(long)]
         no_scan: bool,
@@ -219,19 +226,23 @@ async fn main() -> Result<()> {
             harness,
             limit,
             force,
+            estimate,
             no_scan,
             json,
         } => {
             cmd_sync(
                 db_path,
                 roots,
-                days,
-                date.as_deref(),
-                harness,
-                limit,
-                force,
-                no_scan,
-                json,
+                SyncCmdArgs {
+                    days,
+                    date,
+                    harness,
+                    limit,
+                    force,
+                    estimate,
+                    no_scan,
+                    json,
+                },
             )
             .await
         }
@@ -375,19 +386,24 @@ fn cmd_scan(db_path: &Path, roots: &HarnessRoots, json: bool) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn cmd_sync(
-    db_path: PathBuf,
-    roots: HarnessRoots,
+struct SyncCmdArgs {
     days: usize,
-    date: Option<&str>,
+    date: Option<String>,
     harness: Option<String>,
     limit: Option<usize>,
     force: bool,
+    estimate: bool,
     no_scan: bool,
     json: bool,
-) -> Result<()> {
-    let anchor_date = match date.map(str::trim).filter(|s| !s.is_empty()) {
+}
+
+async fn cmd_sync(db_path: PathBuf, roots: HarnessRoots, args: SyncCmdArgs) -> Result<()> {
+    let anchor_date = match args
+        .date
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(raw) => Some(
             NaiveDate::parse_from_str(raw, "%Y-%m-%d")
                 .with_context(|| format!("invalid `--date` value `{raw}` (expected YYYY-MM-DD)"))?,
@@ -395,24 +411,38 @@ async fn cmd_sync(
         None => None,
     };
     let scope = SyncScope {
-        days: days.clamp(
+        days: args.days.clamp(
             planar_core::defaults::WINDOW_DAYS_MIN,
             planar_core::defaults::WINDOW_DAYS_MAX,
         ),
         anchor_date,
-        harness,
+        harness: args.harness,
     };
 
     let hydrated_path = hydrate_macos_path();
     let state = AppState::with_hydrated_path(db_path, roots, hydrated_path);
-    if !no_scan {
+
+    // `--estimate` is strictly read-only: never scan harness logs or mutate/create SQLite.
+    if args.estimate {
+        let est = estimate_sync_cost(&state, args.force, args.limit, Some(scope))
+            .await
+            .context("failed to estimate Sync cost")?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&est)?);
+        } else {
+            print!("{}", render_sync_estimate(&est));
+        }
+        return Ok(());
+    }
+
+    if !args.no_scan {
         state
             .run_scan()
             .await
             .context("incremental trajectory scan failed")?;
     }
 
-    let mut rx = spawn_sync_stream(state, scope, force, limit);
+    let mut rx = spawn_sync_stream(state, scope, args.force, args.limit);
     let mut final_summary: Option<SyncSummaryDto> = None;
 
     while let Some(evt) = rx.recv().await {
@@ -423,16 +453,22 @@ async fn cmd_sync(
                 backend,
                 ..
             } => {
-                if !json && total > 0 {
+                if !args.json && total > 0 {
                     eprintln!(
                         "Syncing {total} session(s) in {total_batches} batch(es) via {backend}..."
                     );
                 }
             }
             SyncStreamEvent::BatchDone(done) => {
-                if !json && done.batch_index > 0 {
+                if !args.json && done.batch_index > 0 {
+                    let usage_note = done
+                        .batch_usage
+                        .as_ref()
+                        .map(format_sync_usage_inline)
+                        .filter(|s| !s.is_empty())
+                        .map_or_else(String::new, |s| format!(" [{s}]"));
                     eprintln!(
-                        "  batch {}/{}: +{} filed ({} failed)",
+                        "  batch {}/{}: +{} filed ({} failed){usage_note}",
                         done.batch_index,
                         done.total_batches,
                         done.batch_processed,
@@ -454,15 +490,22 @@ async fn cmd_sync(
         skipped: 0,
         backend_used: "unknown".to_string(),
         last_error: None,
+        usage: None,
     });
 
-    if json {
+    if args.json {
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }
 
+    let usage_note = summary
+        .usage
+        .as_ref()
+        .map(format_sync_usage_inline)
+        .filter(|s| !s.is_empty())
+        .map_or_else(String::new, |s| format!(" ({s})"));
     println!(
-        "Sync complete via {}: processed={}, failed={}, skipped={}",
+        "Sync complete via {}: processed={}, failed={}, skipped={}{usage_note}",
         summary.backend_used, summary.processed, summary.failed, summary.skipped
     );
     if let Some(ref err) = summary.last_error {
@@ -472,6 +515,83 @@ async fn cmd_sync(
         eprintln!("Warning: {err}");
     }
     Ok(())
+}
+
+fn format_sync_usage_inline(usage: &SyncUsageDto) -> String {
+    if usage.is_local_cli {
+        return "local CLI".to_string();
+    }
+    if usage.total_tokens == 0 && usage.cost_usd.is_none() && !usage.incomplete {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    if usage.total_tokens > 0 {
+        let suffix = if usage.incomplete && usage.cost_usd.is_none() {
+            "*"
+        } else {
+            ""
+        };
+        parts.push(format!(
+            "{} tok{suffix}",
+            format_tokens_compact(usage.total_tokens)
+        ));
+    }
+    if let Some(cost) = usage.cost_usd {
+        let formatted = format_usd_compact(cost);
+        if usage.incomplete {
+            parts.push(format!("{formatted}* (partial)"));
+        } else {
+            parts.push(formatted);
+        }
+    } else if usage.incomplete {
+        parts.push("partial usage".to_string());
+    }
+    parts.join(" · ")
+}
+
+fn render_sync_estimate(est: &SyncEstimateDto) -> String {
+    let model_suffix = if est.model.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", est.model)
+    };
+    if est.session_count == 0 {
+        return format!(
+            "Sync estimate ({}{model_suffix}): 0 pending sessions (nothing to sync)\n",
+            est.backend
+        );
+    }
+
+    let thinking_suffix = if est.estimated_thinking_tokens > 0 {
+        format!(
+            " (+~{} thinking)",
+            format_tokens_compact(est.estimated_thinking_tokens)
+        )
+    } else {
+        String::new()
+    };
+    let cost_line = if est.is_local_cli {
+        "Local CLI / subscription (no direct API cost)".to_string()
+    } else if let Some(range) = est.estimated_cost_usd_range {
+        let lo = format_usd_compact(range.low);
+        let hi = format_usd_compact(range.high);
+        if lo == hi {
+            format!("~{lo} USD")
+        } else {
+            format!("~{lo}–{hi} USD")
+        }
+    } else {
+        "— (model pricing unavailable)".to_string()
+    };
+
+    format!(
+        "Sync estimate ({}{model_suffix}):\n  Pending: {} session(s) in {} batch(es)\n  Tokens:  ~{} input · ~{} output{thinking_suffix}\n  Cost:    {cost_line}\n",
+        est.backend,
+        est.session_count,
+        est.batch_count,
+        format_tokens_compact(est.estimated_input_tokens),
+        format_tokens_compact(est.estimated_output_tokens),
+    )
 }
 
 async fn cmd_regroup(db_path: PathBuf, roots: HarnessRoots, json: bool) -> Result<()> {
@@ -743,6 +863,7 @@ mod tests {
             "--harness",
             "codex",
             "--force",
+            "--estimate",
             "--json",
         ])
         .unwrap();
@@ -751,6 +872,7 @@ mod tests {
             Commands::Sync {
                 days: 14,
                 force: true,
+                estimate: true,
                 json: true,
                 ..
             }
@@ -771,5 +893,108 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn sync_estimate_cli_forms_never_scan_or_mutate_sqlite() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let roots = HarnessRoots {
+            claude_projects: dir.path().join("claude"),
+            codex_sessions: dir.path().join("codex").join("sessions"),
+            codex_archived: dir.path().join("codex").join("archived_sessions"),
+            antigravity_brain: dir.path().join("antigravity"),
+            dsh_sessions: dir.path().join("dsh").join("sessions"),
+        };
+
+        // Place a real rollout file on disk so an unintended scan would ingest it and mutate DB.
+        let sess_dir = roots.codex_sessions.join("2026").join("11").join("25");
+        std::fs::create_dir_all(&sess_dir).unwrap();
+        let now = Local::now();
+        let t1 = (now - chrono::Duration::minutes(10)).to_rfc3339();
+        let t2 = (now - chrono::Duration::minutes(8)).to_rfc3339();
+        let t3 = (now - chrono::Duration::minutes(5)).to_rfc3339();
+        std::fs::write(
+            sess_dir.join("rollout-ro.jsonl"),
+            format!(
+                concat!(
+                    "{{\"timestamp\":\"{t1}\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"ro-1\",\"cwd\":\"/tmp/ws\",\"source\":\"vscode\"}}}}\n",
+                    "{{\"timestamp\":\"{t1}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 1\"}}]}}}}\n",
+                    "{{\"timestamp\":\"{t2}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 2\"}}]}}}}\n",
+                    "{{\"timestamp\":\"{t3}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Turn 3\"}}]}}}}\n"
+                ),
+                t1 = t1,
+                t2 = t2,
+                t3 = t3,
+            ),
+        )
+        .unwrap();
+
+        // 1. Non-existent DB: neither `--estimate` nor `--estimate --no-scan` may create it.
+        let missing_db = dir.path().join("uncreated").join("planar.db");
+        for no_scan in [false, true] {
+            cmd_sync(
+                missing_db.clone(),
+                roots.clone(),
+                SyncCmdArgs {
+                    days: 7,
+                    date: None,
+                    harness: None,
+                    limit: None,
+                    force: false,
+                    estimate: true,
+                    no_scan,
+                    json: true,
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                !missing_db.exists(),
+                "sync --estimate (no_scan={no_scan}) must not create a missing SQLite DB"
+            );
+        }
+
+        // 2. Existing initialized DB: neither `--estimate` nor `--estimate --no-scan` may scan or modify bytes.
+        let existing_db = dir.path().join("existing.db");
+        {
+            let _store = Store::open(&existing_db).unwrap();
+        }
+        let bytes_before = std::fs::read(&existing_db).unwrap();
+        for no_scan in [false, true] {
+            cmd_sync(
+                existing_db.clone(),
+                roots.clone(),
+                SyncCmdArgs {
+                    days: 7,
+                    date: None,
+                    harness: None,
+                    limit: None,
+                    force: false,
+                    estimate: true,
+                    no_scan,
+                    json: true,
+                },
+            )
+            .await
+            .unwrap();
+            let bytes_after = std::fs::read(&existing_db).unwrap();
+            assert_eq!(
+                bytes_before, bytes_after,
+                "sync --estimate (no_scan={no_scan}) must not mutate existing SQLite DB"
+            );
+        }
+
+        // Verify partial usage formatting marks incomplete totals honestly.
+        let partial = SyncUsageDto {
+            total_tokens: 14_000,
+            cost_usd: Some(0.03),
+            api_calls: 3,
+            priced_calls: 2,
+            incomplete: true,
+            ..SyncUsageDto::default()
+        };
+        let rendered = format_sync_usage_inline(&partial);
+        assert!(rendered.contains("$0.03*"), "got: {rendered}");
+        assert!(rendered.contains("partial"), "got: {rendered}");
     }
 }

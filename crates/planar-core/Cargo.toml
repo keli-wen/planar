@@ -15,6 +15,7 @@ axum.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 futures-core.workspace = true
+genai-prices.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

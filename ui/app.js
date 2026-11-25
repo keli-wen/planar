@@ -229,6 +229,16 @@ const I18N = {
     descApiKey: "留空时自动尝试读取对应环境变量（如 DEEPSEEK_API_KEY）。",
     lblBatchLimit: "单批归纳会话上限",
     descBatchLimit: "控制每批处理会话数（1–50），大批量待归纳时将逐批更新平面。",
+    lblSyncEstimate: "预计本次归纳",
+    syncEstLoading: "估算中…",
+    syncEstNone: "当前范围无待归纳会话",
+    syncEstLocalCli: "本机 CLI（订阅额度）",
+    syncEstNoPricing: "目录价未知",
+    syncEstUnavailable: "估算暂不可用",
+    syncEstTokens: "~{inTok} 输入 / ~{outTok} 输出",
+    syncEstTokensThinking: "~{inTok} 输入 / ~{outTok} 输出（含 ~{thinkTok} 思考）",
+    syncUsageLocalCli: "本机 CLI",
+    syncUsagePartial: "部分计费",
     testProcBtn: "测试连接",
     testingProcBtn: "正在连接测试…",
     syncNowBtn: "立即归纳",
@@ -465,6 +475,16 @@ const I18N = {
     descApiKey: "Leave empty to read standard environment variables (e.g. DEEPSEEK_API_KEY).",
     lblBatchLimit: "Max sessions per Sync batch",
     descBatchLimit: "Caps batch size (1–50); large backlogs update the plane progressively batch by batch.",
+    lblSyncEstimate: "Next Sync estimate",
+    syncEstLoading: "Estimating…",
+    syncEstNone: "No pending sessions in scope",
+    syncEstLocalCli: "Local CLI (subscription)",
+    syncEstNoPricing: "No list price",
+    syncEstUnavailable: "Estimate unavailable",
+    syncEstTokens: "~{inTok} in / ~{outTok} out",
+    syncEstTokensThinking: "~{inTok} in / ~{outTok} out (+~{thinkTok} thinking)",
+    syncUsageLocalCli: "local CLI",
+    syncUsagePartial: "partial",
     testProcBtn: "Test connection",
     testingProcBtn: "Testing connection…",
     syncNowBtn: "Sync now",
@@ -705,6 +725,11 @@ const state = {
   syncTotalBatches: 0,
   syncBatchItems: [],
   syncLastFiled: null,
+  syncUsage: null,
+  syncEstimate: null,
+  syncEstimateKey: null,
+  syncEstimateError: false,
+  isLoadingSyncEstimate: false,
   syncAbortController: null,
   isTestingProcessor: false,
   isRegrouping: false,
@@ -1364,11 +1389,320 @@ function fmtTokensCompact(tokens) {
 }
 
 function fmtCostCompact(usd) {
+  const exact = fmtUsdExact(usd);
+  return exact ? `≈ ${exact}` : "";
+}
+
+function fmtUsdExact(usd) {
   const c = Number(usd);
   if (!Number.isFinite(c) || c <= 0) return "";
-  if (c < 0.005) return "≈ <$0.01";
-  if (c >= 100) return `≈ $${Math.round(c)}`;
-  return `≈ $${c.toFixed(2)}`;
+  if (c < 0.005) return "<$0.01";
+  if (c >= 100) return `$${Math.round(c)}`;
+  return `$${c.toFixed(2)}`;
+}
+
+function fmtCostRange(range) {
+  if (!range || typeof range !== "object") return "";
+  const lo = fmtUsdExact(range.low);
+  const hi = fmtUsdExact(range.high);
+  if (!lo && !hi) return "";
+  if (!hi || lo === hi) return `~${lo}`;
+  return `~${lo}–${hi}`;
+}
+
+function fmtSyncUsageCompact(usage) {
+  if (!usage || typeof usage !== "object") return "";
+  if (usage.isLocalCli) return t("syncUsageLocalCli");
+  const incomplete = Boolean(usage.incomplete);
+  const parts = [];
+  if (Number(usage.totalTokens) > 0) {
+    const tokSuffix = incomplete && !(Number(usage.costUsd) > 0) ? "*" : "";
+    parts.push(`${fmtTokensCompact(usage.totalTokens)} tok${tokSuffix}`);
+  }
+  const cost = fmtUsdExact(usage.costUsd);
+  if (cost) {
+    parts.push(incomplete ? `${cost}* (${t("syncUsagePartial")})` : cost);
+  } else if (incomplete) {
+    parts.push(t("syncUsagePartial"));
+  }
+  return parts.join(" · ");
+}
+
+function syncScopeQuerySuffix() {
+  return state.selectedHarness && state.selectedHarness !== "all"
+    ? `${apiQuerySuffix()}&harness=${encodeURIComponent(state.selectedHarness)}`
+    : apiQuerySuffix();
+}
+
+function syncEstimateKey() {
+  const s = state.settings || DEFAULT_SETTINGS;
+  const eh = s.enabledHarnesses || DEFAULT_SETTINGS.enabledHarnesses;
+  const enabledSig = HARNESS_ORDER.map((id) => (eh[id] !== false ? "1" : "0")).join("");
+  return JSON.stringify([
+    state.dataSource,
+    rangeDays(),
+    state.anchorDate || "",
+    state.selectedHarness || "all",
+    s.processorMode || DEFAULT_SETTINGS.processorMode,
+    (s.cliHarness || "").trim(),
+    (s.cliModel || "").trim(),
+    (s.apiProvider || DEFAULT_SETTINGS.apiProvider).trim(),
+    (s.apiBaseUrl || "").trim(),
+    (s.apiModel || "").trim(),
+    Number(s.syncBatchLimit) || DEFAULT_SETTINGS.syncBatchLimit,
+    Number(s.openingSteps) || DEFAULT_SETTINGS.openingSteps,
+    Number(s.closingSteps) || DEFAULT_SETTINGS.closingSteps,
+    Number(s.fewestUserInputs) || DEFAULT_SETTINGS.fewestUserInputs,
+    Number(s.longestUserChars) || 0,
+    Number(s.longestAgentChars) || 0,
+    Boolean(s.includeArchived),
+    enabledSig,
+  ]);
+}
+
+function getActiveSyncEstimate() {
+  const key = syncEstimateKey();
+  if (state.dataSource !== "api") {
+    if (state.syncEstimate && state.syncEstimateKey === key) {
+      return state.syncEstimate;
+    }
+    const computed = computeMockSyncEstimate();
+    state.syncEstimate = computed;
+    state.syncEstimateKey = key;
+    state.syncEstimateError = false;
+    return computed;
+  }
+  return state.syncEstimate && state.syncEstimateKey === key ? state.syncEstimate : null;
+}
+
+function computeMockSyncEstimate() {
+  const s = state.settings;
+  const isLocalCli = (s.processorMode || DEFAULT_SETTINGS.processorMode) !== "api";
+  const pending = (state.unsummarized || []).filter(matchesHarness);
+  const sessionCount = pending.length;
+  const batchLimit = Math.max(1, Math.min(50, Number(s.syncBatchLimit) || DEFAULT_SETTINGS.syncBatchLimit));
+  const batchCount = sessionCount > 0 ? Math.ceil(sessionCount / batchLimit) : 0;
+  const curApi = (s.apiProvider || DEFAULT_SETTINGS.apiProvider).trim() || DEFAULT_SETTINGS.apiProvider;
+  const provMeta = getApiProviderMeta(curApi);
+  const model = isLocalCli
+    ? (s.cliModel || "").trim()
+    : (s.apiModel || "").trim() || provMeta.defaultModel || "";
+  const backend = isLocalCli
+    ? `cli:${(s.cliHarness || "").trim() || "unconfigured"}`
+    : `api:${curApi}`;
+
+  if (sessionCount === 0) {
+    return {
+      sessionCount: 0,
+      batchCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      estimatedThinkingTokens: 0,
+      estimatedCostUsdRange: null,
+      model,
+      backend,
+      isLocalCli,
+    };
+  }
+
+  const estimatedInputTokens = sessionCount * 2800 + batchCount * 380;
+  const estimatedOutputTokens = sessionCount * 180 + batchCount * 60;
+  const lowerModel = model.toLowerCase();
+  const isThinkingModel =
+    !lowerModel.includes("flash-lite") &&
+    !lowerModel.includes("nano") &&
+    !lowerModel.includes("haiku") &&
+    (lowerModel.startsWith("gemini-4-") ||
+      lowerModel.includes("reasoner") ||
+      lowerModel.startsWith("gpt-5") ||
+      lowerModel.startsWith("gpt-6") ||
+      lowerModel.startsWith("o3"));
+  const estimatedThinkingTokens = isThinkingModel ? sessionCount * 380 + batchCount * 200 : 0;
+
+  let estimatedCostUsdRange = null;
+  const knownBillingProvider =
+    curApi !== "ollama" && curApi !== "openai-compatible" && curApi !== "siliconflow";
+  const customBase = (s.apiBaseUrl || "").trim();
+  const usesOfficialBase =
+    !customBase ||
+    (() => {
+      try {
+        const defaultUrl = new URL(provMeta.defaultBase || "");
+        const customUrl = new URL(customBase);
+        return (
+          customUrl.protocol === "https:" &&
+          customUrl.hostname.toLowerCase() === defaultUrl.hostname.toLowerCase()
+        );
+      } catch {
+        return false;
+      }
+    })();
+  if (!isLocalCli && knownBillingProvider && usesOfficialBase) {
+    const isHigherTier =
+      lowerModel.startsWith("gemini-4-") ||
+      lowerModel.includes("sonnet") ||
+      lowerModel.includes("opus") ||
+      lowerModel.startsWith("gpt-5") ||
+      lowerModel.startsWith("gpt-6");
+    const inRate = isHigherTier ? 1.5 : 0.3;
+    const outRate = isHigherTier ? 7.5 : 2.5;
+    const low =
+      ((estimatedInputTokens * 0.9) * inRate +
+        (sessionCount * 120 + batchCount * 40 + estimatedThinkingTokens * 0.5) * outRate) /
+      1_000_000;
+    const high =
+      ((estimatedInputTokens * 1.1) * inRate +
+        (sessionCount * 260 + batchCount * 90 + estimatedThinkingTokens * 1.6) * outRate) /
+      1_000_000;
+    estimatedCostUsdRange = { low, high };
+  }
+
+  return {
+    sessionCount,
+    batchCount,
+    estimatedInputTokens,
+    estimatedOutputTokens,
+    estimatedThinkingTokens,
+    estimatedCostUsdRange,
+    model,
+    backend,
+    isLocalCli,
+  };
+}
+
+let syncEstimateReqSeq = 0;
+
+function invalidateSyncEstimate(refresh = true) {
+  syncEstimateReqSeq += 1;
+  state.syncEstimate = null;
+  state.syncEstimateKey = null;
+  state.syncEstimateError = false;
+  state.isLoadingSyncEstimate = false;
+  if (!refresh || state.dataSource !== "api") return;
+  const onProcessorTab = state.route === "settings" && state.settingsTab === "processor";
+  const hasVisiblePending = (state.unsummarized || []).filter(matchesHarness).length > 0;
+  if (onProcessorTab || hasVisiblePending) {
+    void loadSyncEstimate(!onProcessorTab);
+  }
+}
+
+async function loadSyncEstimate(silent = false) {
+  const reqKey = syncEstimateKey();
+  const reqId = ++syncEstimateReqSeq;
+  if (state.dataSource !== "api") {
+    state.syncEstimate = computeMockSyncEstimate();
+    state.syncEstimateKey = reqKey;
+    state.syncEstimateError = false;
+    state.isLoadingSyncEstimate = false;
+    if (!silent) render();
+    return;
+  }
+  state.syncEstimateError = false;
+  if (!silent) {
+    state.isLoadingSyncEstimate = true;
+    render();
+  }
+  try {
+    const res = await fetch(`/api/sync/estimate?${syncScopeQuerySuffix()}`);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    // Reject stale responses after JSON decoding if a newer request started or scope/settings changed.
+    if (reqId !== syncEstimateReqSeq || reqKey !== syncEstimateKey()) {
+      return;
+    }
+    state.syncEstimate = data;
+    state.syncEstimateKey = reqKey;
+    state.syncEstimateError = false;
+  } catch {
+    if (reqId === syncEstimateReqSeq && reqKey === syncEstimateKey()) {
+      state.syncEstimate = null;
+      state.syncEstimateKey = reqKey;
+      state.syncEstimateError = true;
+    }
+  } finally {
+    if (reqId === syncEstimateReqSeq && reqKey === syncEstimateKey()) {
+      state.isLoadingSyncEstimate = false;
+      render();
+    }
+  }
+}
+
+function fmtSyncBatchSummary(sessions, batches) {
+  if (lang() === "zh") {
+    return `${sessions} 个会话 · ${batches} 批`;
+  }
+  const sWord = sessions === 1 ? "session" : "sessions";
+  const bWord = batches === 1 ? "batch" : "batches";
+  return `${sessions} ${sWord} · ${batches} ${bWord}`;
+}
+
+function buildSyncButtonTooltip(pendingCount) {
+  const base = t("syncTip");
+  if (pendingCount <= 0) return base;
+  const est = getActiveSyncEstimate();
+  if (!est || est.sessionCount <= 0) return base;
+  const summary = fmtSyncBatchSummary(est.sessionCount, est.batchCount);
+  if (est.isLocalCli) {
+    return `${base} · ${summary} · ${t("syncEstLocalCli")}`;
+  }
+  const rangeStr = fmtCostRange(est.estimatedCostUsdRange);
+  return rangeStr ? `${base} · ${summary} · ${rangeStr}` : `${base} · ${summary}`;
+}
+
+function renderSyncEstimateReadout() {
+  const key = syncEstimateKey();
+  const est = getActiveSyncEstimate();
+  if (state.isLoadingSyncEstimate && !est) {
+    return `<span class="proc-estimate-readout">${escapeHtml(t("syncEstLoading"))}</span>`;
+  }
+  if (state.syncEstimateError && state.syncEstimateKey === key) {
+    return `<span class="proc-estimate-readout">${escapeHtml(t("syncEstUnavailable"))}</span>`;
+  }
+  if (!est || est.sessionCount === 0) {
+    return `<span class="proc-estimate-readout">${escapeHtml(t("syncEstNone"))}</span>`;
+  }
+  const batchSummary = fmtSyncBatchSummary(est.sessionCount, est.batchCount);
+  if (est.isLocalCli) {
+    return `
+      <span class="proc-estimate-readout">
+        <span>${escapeHtml(batchSummary)}</span>
+        <span class="proc-estimate-sep">·</span>
+        <span>${escapeHtml(t("syncEstLocalCli"))}</span>
+      </span>
+    `;
+  }
+  const tokText =
+    est.estimatedThinkingTokens > 0
+      ? t("syncEstTokensThinking", {
+          inTok: fmtTokensCompact(est.estimatedInputTokens),
+          outTok: fmtTokensCompact(est.estimatedOutputTokens),
+          thinkTok: fmtTokensCompact(est.estimatedThinkingTokens),
+        })
+      : t("syncEstTokens", {
+          inTok: fmtTokensCompact(est.estimatedInputTokens),
+          outTok: fmtTokensCompact(est.estimatedOutputTokens),
+        });
+  const rangeText = fmtCostRange(est.estimatedCostUsdRange);
+  return `
+    <span class="proc-estimate-readout">
+      <span>${escapeHtml(batchSummary)}</span>
+      <span class="proc-estimate-sep">·</span>
+      <span>${escapeHtml(tokText)}</span>
+      <span class="proc-estimate-sep">·</span>
+      <span class="${rangeText ? "proc-estimate-cost" : ""}">${escapeHtml(
+        rangeText || t("syncEstNoPricing")
+      )}</span>
+    </span>
+  `;
+}
+
+function setSelectedHarness(next) {
+  const raw = next || "all";
+  state.selectedHarness = raw !== "all" && state.selectedHarness === raw ? "all" : raw;
+  invalidateSyncEstimate(true);
+  render();
 }
 
 const DEFAULT_VISIBLE_LINES = 8;
@@ -2535,7 +2869,13 @@ function markSettingsSaved() {
 
 function persistSettings() {
   markSettingsSaved();
-  if (state.dataSource !== "api") return;
+  invalidateSyncEstimate(false);
+  if (state.dataSource !== "api") {
+    if (state.route === "settings" && state.settingsTab === "processor") {
+      render();
+    }
+    return;
+  }
   void (async () => {
     try {
       const res = await fetch(`/api/settings?${apiQuerySuffix()}`, {
@@ -2554,10 +2894,16 @@ function persistSettings() {
         if (Array.isArray(data.contributions)) state.contributions = data.contributions;
         if (Array.isArray(data.harnesses)) state.harnesses = data.harnesses;
         if (typeof data.archivedCount === "number") state.archivedCount = data.archivedCount;
+        if (state.route === "settings" && state.settingsTab === "processor") {
+          void loadSyncEstimate(true);
+        }
         return;
       }
       applyPlaneResponse(data);
       render();
+      if (state.route === "settings" && state.settingsTab === "processor") {
+        void loadSyncEstimate(true);
+      }
     } catch {
       // Ignore transient offline save errors
     }
@@ -2580,6 +2926,9 @@ function openSettingsPage(tab) {
     render();
   } else {
     render();
+  }
+  if (state.settingsTab === "processor") {
+    void loadSyncEstimate();
   }
 }
 
@@ -2676,7 +3025,7 @@ function renderTopbar() {
       <div class="topbar-actions">
         ${rangeControlHtml}
         <button class="btn-sync ${pendingCount > 0 ? "has-pending" : ""} ${state.isSyncing ? "is-syncing" : ""}"
-          data-action="sync-now" title="${escapeHtml(t("syncTip"))}">
+          data-action="sync-now" title="${escapeHtml(buildSyncButtonTooltip(pendingCount))}">
           ${pendingCount > 0 || state.isSyncing ? slicerTriggerIconSvg() : syncRefreshIconSvg()}
           <span>${escapeHtml(state.isSyncing ? t("syncing") : pendingCount > 0 ? t("sync") : t("syncIdle"))}</span>
           ${pendingCount > 0 ? `<span class="sync-badge">${pendingCount}</span>` : ""}
@@ -2751,6 +3100,11 @@ function renderSyncProgressStrip() {
     subRowHtml = `<div class="sync-progress-sub">${activeHtml}${filedHtml}</div>`;
   }
 
+  const liveUsageBadge =
+    state.syncUsage && !state.syncUsage.isLocalCli && state.syncUsage.totalTokens > 0
+      ? fmtSyncUsageCompact(state.syncUsage)
+      : "";
+
   return `
     <div class="sync-progress-strip">
       <div class="scan-line-bar" aria-hidden="true">
@@ -2760,6 +3114,7 @@ function renderSyncProgressStrip() {
         <span class="sync-progress-text">
           ${slicerTriggerIconSvg()}
           <span>${escapeHtml(bannerLabel)}</span>
+          ${liveUsageBadge ? `<span class="sync-sub-chip">${escapeHtml(liveUsageBadge)}</span>` : ""}
           ${
             state.syncFailedCount > 0
               ? `<span class="sync-sub-chip is-warn">${escapeHtml(
@@ -3782,11 +4137,13 @@ function renderSettingsView(motionCls = "") {
       `;
     } else if (state.lastSync) {
       const hasErr = Boolean(state.lastSync.lastError);
+      const usageTxt = fmtSyncUsageCompact(state.lastSync.usage);
       consoleStatusHtml = `
         <span class="proc-readout ${hasErr ? "is-err" : "is-muted"}">
           <span>${escapeHtml(state.lastSync.backendUsed)}</span>
           <span>·</span>
           <span>${state.lastSync.processed} ok / ${state.lastSync.failed} fail</span>
+          ${usageTxt ? `<span>·</span><span>${escapeHtml(usageTxt)}</span>` : ""}
           ${hasErr ? `<span>· ${escapeHtml(state.lastSync.lastError)}</span>` : ""}
         </span>
       `;
@@ -3897,6 +4254,11 @@ function renderSettingsView(motionCls = "") {
               <span>${s.syncBatchLimit || DEFAULT_SETTINGS.syncBatchLimit}</span>
               <button type="button" data-action="step" data-field="syncBatchLimit" data-delta="1">+</button>
             </div>
+          </div>
+
+          <div class="settings-row">
+            <div class="settings-row-title">${escapeHtml(t("lblSyncEstimate"))}</div>
+            ${renderSyncEstimateReadout()}
           </div>
 
           <div class="proc-card-footer ${state.isTestingProcessor || state.isSyncing ? "is-busy" : ""}">
@@ -4935,8 +5297,17 @@ function applyPlaneResponse(data) {
   }
   applyThemeAndLang();
 
+  const prevUnsummarizedSig = (state.unsummarized || [])
+    .map((u) => `${u.id}:${u.steps || 0}:${u.userInputCount || 0}`)
+    .join("|");
   state.lines = Array.isArray(data.lines) ? data.lines : [];
   state.unsummarized = Array.isArray(data.unsummarized) ? data.unsummarized : [];
+  const nextUnsummarizedSig = state.unsummarized
+    .map((u) => `${u.id}:${u.steps || 0}:${u.userInputCount || 0}`)
+    .join("|");
+  if (prevUnsummarizedSig !== nextUnsummarizedSig) {
+    invalidateSyncEstimate(false);
+  }
   state.shortSessions = data.shortSessions || { totalCount: 0, items: [], weekMinutes: 0 };
   if (Array.isArray(data.contributions)) state.contributions = data.contributions;
   if (Array.isArray(data.harnesses)) state.harnesses = data.harnesses;
@@ -4992,6 +5363,12 @@ async function loadPlaneFromApi(rescan = false) {
     lastApiRefreshMs = Date.now();
     applyPlaneResponse(data);
     render();
+    if (
+      (state.route === "settings" && state.settingsTab === "processor") ||
+      state.unsummarized.length > 0
+    ) {
+      void loadSyncEstimate(true);
+    }
     return true;
   } catch {
     return false;
@@ -5252,6 +5629,7 @@ async function runSyncBatches() {
   state.syncTotalBatches = 0;
   state.syncBatchItems = [];
   state.syncLastFiled = null;
+  state.syncUsage = null;
   const ctrl = new AbortController();
   state.syncAbortController = ctrl;
   render();
@@ -5263,10 +5641,7 @@ async function runSyncBatches() {
     // Always invoke `/api/sync/stream` (which scans once on the backend) so grown
     // sessions and `slice_config_hash`-invalidated digests refresh even when the
     // unassigned `unsummarized` queue is empty.
-    const syncSuffix =
-      state.selectedHarness && state.selectedHarness !== "all"
-        ? `${apiQuerySuffix()}&harness=${encodeURIComponent(state.selectedHarness)}`
-        : apiQuerySuffix();
+    const syncSuffix = syncScopeQuerySuffix();
 
     const res = await fetch(`/api/sync/stream?${syncSuffix}`, {
       method: "POST",
@@ -5276,6 +5651,7 @@ async function runSyncBatches() {
       const fallback = await apiApply(`/api/sync?${syncSuffix}`, "POST");
       if (fallback?.lastSync?.backendUsed) backendUsed = fallback.lastSync.backendUsed;
       if (fallback?.lastSync?.lastError) lastErrorMsg = fallback.lastSync.lastError;
+      if (fallback?.lastSync?.usage) state.syncUsage = fallback.lastSync.usage;
       state.syncProcessedTotal = fallback?.lastSync?.processed || 0;
       state.syncFailedCount = fallback?.lastSync?.failed || 0;
     } else {
@@ -5323,6 +5699,7 @@ async function runSyncBatches() {
           if (evt.totalBatches > 0) state.syncTotalBatches = evt.totalBatches;
           if (evt.backendUsed) backendUsed = evt.backendUsed;
           if (evt.error) lastErrorMsg = evt.error;
+          if (evt.cumulativeUsage) state.syncUsage = evt.cumulativeUsage;
           if (Array.isArray(evt.filed) && evt.filed.length > 0) {
             const firstFiled = evt.filed[0];
             state.syncLastFiled = {
@@ -5349,6 +5726,7 @@ async function runSyncBatches() {
             state.syncFailedCount = evt.summary.failed || 0;
             if (evt.summary.backendUsed) backendUsed = evt.summary.backendUsed;
             if (evt.summary.lastError) lastErrorMsg = evt.summary.lastError;
+            if (evt.summary.usage) state.syncUsage = evt.summary.usage;
           }
           if (evt.plane) {
             lastApiRefreshMs = Date.now();
@@ -5383,6 +5761,10 @@ async function runSyncBatches() {
       }
     }
 
+    const usageSuffix =
+      state.syncUsage && !state.syncUsage.isLocalCli ? fmtSyncUsageCompact(state.syncUsage) : "";
+    const backendWithSpend = usageSuffix ? `${backendUsed} · ${usageSuffix}` : backendUsed;
+
     if (stoppedByUser) {
       showToast(t("toastSyncStopped", { n: state.syncProcessedTotal }));
     } else if (state.syncProcessedTotal > 0 && state.syncFailedCount > 0) {
@@ -5390,11 +5772,11 @@ async function runSyncBatches() {
         t("toastSyncedWithFail", {
           n: state.syncProcessedTotal,
           failed: state.syncFailedCount,
-          backend: backendUsed,
+          backend: backendWithSpend,
         })
       );
     } else if (state.syncProcessedTotal > 0) {
-      showToast(t("toastSynced", { n: state.syncProcessedTotal, backend: backendUsed }));
+      showToast(t("toastSynced", { n: state.syncProcessedTotal, backend: backendWithSpend }));
     } else if (lastErrorMsg) {
       showToast(lastErrorMsg);
     } else {
@@ -5413,6 +5795,7 @@ async function runSyncBatches() {
     state.syncStopRequested = false;
     state.syncBatchItems = [];
     state.syncAbortController = null;
+    invalidateSyncEstimate(true);
     render();
   }
 }
@@ -5449,6 +5832,9 @@ document.addEventListener("click", (e) => {
     state.popover = null;
     state.confirmResetDefaults = false;
     render();
+    if (nextTab === "processor") {
+      void loadSyncEstimate();
+    }
     return;
   }
 
@@ -5607,9 +5993,7 @@ document.addEventListener("click", (e) => {
   }
 
   if (action === "filter-harness") {
-    const next = btn.dataset.harness || "all";
-    state.selectedHarness = next !== "all" && state.selectedHarness === next ? "all" : next;
-    render();
+    setSelectedHarness(btn.dataset.harness || "all");
     return;
   }
 
@@ -5626,6 +6010,7 @@ document.addEventListener("click", (e) => {
       state.anchorDate = iso;
       state.mode = "day";
     }
+    invalidateSyncEstimate(false);
     if (state.dataSource === "api") {
       void loadPlaneFromApi(false).then((ok) => {
         if (ok) {
@@ -5645,6 +6030,7 @@ document.addEventListener("click", (e) => {
     state.anchorDate = null;
     state.popover = null;
     if (tooltipEl) tooltipEl.hidden = true;
+    invalidateSyncEstimate(false);
     if (state.dataSource === "api") {
       void loadPlaneFromApi(false);
       return;
@@ -5680,6 +6066,7 @@ document.addEventListener("click", (e) => {
     if (state.dataSource === "mock") {
       ensureMockWindowDays(rangeDays());
     }
+    invalidateSyncEstimate(false);
     render();
     if (state.dataSource === "api" && nextMode !== "day" && state.days.length !== rangeDays()) {
       void loadPlaneFromApi(false);
@@ -5716,6 +6103,7 @@ document.addEventListener("click", (e) => {
     if (state.dataSource === "mock") {
       ensureMockWindowDays(rangeDays());
     }
+    invalidateSyncEstimate(false);
     render();
     if (state.dataSource === "api") {
       void loadPlaneFromApi(false);
@@ -6995,4 +7383,16 @@ if (!shouldForceMock(initialUrlParams)) {
   }, 15000);
 }
 
-export { applyPlaneResponse, DEFAULT_SETTINGS, isProcessorConfigured, renderSettingsView, state };
+export {
+  applyPlaneResponse,
+  buildSyncButtonTooltip,
+  DEFAULT_SETTINGS,
+  fmtSyncUsageCompact,
+  isProcessorConfigured,
+  loadSyncEstimate,
+  renderSettingsView,
+  renderSyncEstimateReadout,
+  runSyncBatches,
+  setSelectedHarness,
+  state,
+};
