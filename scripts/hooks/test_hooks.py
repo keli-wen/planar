@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -95,9 +96,15 @@ class PrGuardTests(unittest.TestCase):
         self.assertIsNotNone(decision)
         assert decision is not None
         self.assertEqual(decision["hookSpecificOutput"]["permissionDecision"], "deny")
+        reason = decision["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("WORKFLOW.md", reason)
+        self.assertNotIn("references/", reason)
 
     def test_allows_when_marker_matches_head_and_denies_after_new_commit(self) -> None:
-        pr_guard.write_marker(self.repo)
+        marker_path = pr_guard.write_marker(self.repo)
+        marker_data = json.loads(marker_path.read_text(encoding="utf-8"))
+        self.assertEqual(marker_data["schemaVersion"], 1)
+        self.assertEqual(marker_data["workflow"], "planar-dev/pre-pr")
         payload = {
             "tool_name": "Bash",
             "cwd": str(self.repo),
@@ -185,6 +192,9 @@ class IssueGuardTests(unittest.TestCase):
         self.assertIsNotNone(decision)
         assert decision is not None
         self.assertEqual(decision["hookSpecificOutput"]["permissionDecision"], "deny")
+        reason = decision["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("WORKFLOW.md", reason)
+        self.assertNotIn("references/", reason)
 
     def test_allows_matching_body_file_and_denies_mutated_draft(self) -> None:
         body_path = self.repo / "draft.md"
@@ -196,7 +206,10 @@ class IssueGuardTests(unittest.TestCase):
         )
         body_path.write_text(body, encoding="utf-8")
 
-        issue_guard.write_marker(self.repo, title, body)
+        marker_path = issue_guard.write_marker(self.repo, title, body)
+        marker_data = json.loads(marker_path.read_text(encoding="utf-8"))
+        self.assertEqual(marker_data["schemaVersion"], 1)
+        self.assertEqual(marker_data["workflow"], "planar-dev/issue-filing")
         payload = {
             "tool_name": "Bash",
             "cwd": str(self.repo),

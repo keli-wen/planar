@@ -45,7 +45,7 @@ export default async ({ task, cwd, trace }) => {
 
   work = await refine(work, {
     by: simplifier,
-    criteria: 'Follow .agents/skills/planar-dev/references/simplify.md.',
+    criteria: 'Follow SIMPLIFY.md.',
     maxRounds: 1,
     stage: 'simplify',
   });

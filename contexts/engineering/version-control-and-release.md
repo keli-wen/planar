@@ -35,7 +35,7 @@ Refs: #<issue>
 | `cli` | `crates/planar-cli/` subcommands and flags | `cli: add planar sync, regroup, and open commands` |
 | `app` | `src-tauri/` desktop shell & tray menu | `app(tray): add one-click Sync Pending Sessions item` |
 | `ui` | `ui/` zero-fork frontend and `assets/` screenshots | `ui: always stream sync to refresh grown sessions` |
-| `skill` | `skills/planar/` or `.agents/skills/` | `skill(planar-dev): add release and pre-pr references` |
+| `skill` | `skills/planar/` or `.agents/skills/` | `skill(planar): align L1 batch flags with CLI` |
 | `feat` / `fix` / `refactor` / `test` | Cross-cutting feature, bugfix, refactor, or test changes | `fix(core,ui): preserve clipboard resume on Linux` |
 | `chore` / `ci` / `docs` / `release` | Tooling, hooks, GitHub Actions, root docs, version bumps | `release: v0.1.0` |
 
@@ -61,7 +61,7 @@ All three version manifests MUST stay identical at every commit and release tag 
 2. [`package.json`](../../package.json) → `"version"`
 3. [`src-tauri/tauri.conf.json`](../../src-tauri/tauri.conf.json) → `"version"`
 
-When bumping versions, also refresh `Cargo.lock` (`cargo check --workspace`) and `ui/index.html` asset cache-bust query strings if frontend assets changed.
+When bumping versions, also refresh `Cargo.lock` (`cargo check --workspace`), confirm lockstep (`npm run check:hygiene`), and update `ui/index.html` asset cache-bust query strings if frontend assets changed.
 
 ---
 
@@ -86,19 +86,30 @@ Before tagging any release (or pushing the first public commit):
 
 ## 5. Release & Packaging Channels
 
-### 5.1 Local Daily-Driver Update (macOS)
+### 5.1 Local Daily-Driver Update & Smoke Build (macOS)
 
 ```bash
 cargo install --path crates/planar-cli     # Updates ~/.cargo/bin/planar
+planar --version
+PLANAR_DB_PATH=$(mktemp -d)/planar.db planar status --no-scan
 npm run app:install && npm run app:open    # Builds, ad-hoc signs & installs /Applications/Planar.app
 ```
 
+Verify:
+- `planar --version` prints the target version and runs cleanly against an isolated temp DB.
+- `/Applications/Planar.app` launches, Menu-Bar tray shows `Sync Pending Sessions`, and `Week / Day / Month / Settings` render cleanly.
+
 ### 5.2 GitHub Release (`vX.Y.Z`)
 
-1. Ensure `master` is clean and `npm run verify` passes.
-2. Bump lockstep versions (`Cargo.toml`, `package.json`, `src-tauri/tauri.conf.json`) in a `release: vX.Y.Z` commit.
-3. Create an annotated tag: `git tag -a vX.Y.Z -m "Planar vX.Y.Z"`.
-4. Build release artifacts (`cargo build --release -p planar-cli`, `npm run app:build`), verify checksums (`shasum -a 256`), and publish GitHub Release notes grouping changes by `Added / Fixed / Changed / Context`.
-5. **Planned (post-v0.1)**: Automated GitHub Release workflow for signed macOS `.dmg` + universal `planar` CLI binaries and Homebrew Tap (`brew install keli-wen/tap/planar`).
+> **Human Authorization Gate ([`WORKFLOW.md` §5](../../WORKFLOW.md#5-authorization-gates-human-approval-required))**: Obtain explicit maintainer approval before creating the `release: vX.Y.Z` commit, creating the local annotated tag (`vX.Y.Z`), running `git push`, or publishing a GitHub Release.
 
-For the step-by-step agent release SOP, see [`.agents/skills/planar-dev/references/release.md`](../../.agents/skills/planar-dev/references/release.md).
+1. Ensure `master` is clean (`git status --short`) and `npm run verify` passes with zero warnings.
+2. Bump lockstep versions (`Cargo.toml`, `package.json`, `src-tauri/tauri.conf.json`) and run `cargo check --workspace && npm run check:hygiene`.
+3. **Commit & tag (only when explicitly approved by maintainer per [`WORKFLOW.md` §5](../../WORKFLOW.md#5-authorization-gates-human-approval-required))**:
+   ```bash
+   git add Cargo.toml Cargo.lock package.json src-tauri/tauri.conf.json
+   git commit -m "release: vX.Y.Z"
+   git tag -a vX.Y.Z -m "Planar vX.Y.Z"
+   ```
+4. Build release artifacts (`cargo build --release -p planar-cli`, `npm run app:build`), attach `target/release/planar` and zipped `Planar.app` plus `shasum -a 256` checksums, and publish GitHub Release notes grouping changes under `Added / Fixed / Changed / Context`.
+5. **Planned (post-v0.1)**: Automated GitHub Release workflow for signed macOS `.dmg` + universal `planar` CLI binaries and Homebrew Tap (`brew install keli-wen/tap/planar`).

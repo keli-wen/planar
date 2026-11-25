@@ -86,7 +86,7 @@ Planar 不仅服务于 Coding Agents，仓库本身也采用 **Agent-Native** �
 | **统一入口路由** | [`AGENTS.md`](./AGENTS.md)（`CLAUDE.md` 软链指向） | 精简 L0 入口：核心不变量、目录契约与本地验证命令 |
 | **统一设计规范** | [`DESIGN.md`](./DESIGN.md) | 视觉美学、浅深色 Token、字排规范、`bandPath` 几何与前端设计自检清单 |
 | **持久化上下文** | [`contexts/CONTEXT_MAP.md`](./contexts/CONTEXT_MAP.md) | 唯一上下文根目录：产品设计、系统架构、版本与发布规范、前端契约与 Hooks 架构 |
-| **仓库开发 Skills** | [`.agents/skills/planar-dev/SKILL.md`](./.agents/skills/planar-dev/SKILL.md) | 贡献者 SOP（`planar-dev` + 版本锁定的 Rust Skills，通过 `.claude/skills` 软链共享） |
+| **开发工作流与精简准则** | [`WORKFLOW.md`](./WORKFLOW.md) 与 [`SIMPLIFY.md`](./SIMPLIFY.md) | Issue 驱动交付闭环、分层验证梯子、人工授权门禁与奥卡姆剃刀精简评估（另含 `.agents/skills/` 下版本锁定的 Rust Skills，通过 `.claude/skills` 软链共享） |
 | **分级审查协议** | [`REVIEW.md`](./REVIEW.md) 与 [`CONTRIBUTING.md`](./CONTRIBUTING.md) | 按变更影响半径定义 `T0`–`T3` 四档 Review 模式、不变量核对表与贡献指南 |
 | **双层机械化门禁** | [`.githooks/`](./.githooks) 与 [`scripts/hooks/`](./scripts/hooks) | 通用 Git Hooks、Claude/Codex `PreToolUse` PR & Issue 守卫，以及一键 `npm run verify` |
 | **产品内置 Skill** | [`skills/planar/SKILL.md`](./skills/planar/SKILL.md) | 随 Planar 发布的渐进式披露协议（`L0 → 批量 L1 → 有界 L2`） |

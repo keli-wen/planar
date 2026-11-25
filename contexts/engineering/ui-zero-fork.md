@@ -1,6 +1,6 @@
 # Zero-Fork Vanilla UI Contract (`./ui`)
 
-> Frontend engineering contract for `ui/index.html`, `ui/styles.css`, and `ui/app.js`, including why Planar deliberately skips React and frontend bundlers. For exact visual tokens, palettes, typography, SVG geometry, and component specs, read [`DESIGN.md`](../../DESIGN.md) first.
+> Frontend engineering contract for `ui/defaults.json`, `ui/index.html`, `ui/styles.css`, and `ui/app.js`, including why Planar deliberately skips React and frontend bundlers. For exact visual tokens, palettes, typography, SVG geometry, and component specs, read [`DESIGN.md`](../../DESIGN.md) first.
 
 ---
 
@@ -29,4 +29,30 @@ Planar renders one unified UI across four surfaces: `Planar.app` (~15 MB Tauri v
 - **Container-responsive sidebar (`>= 300px`)**: Use CSS `@container` breakpoints (`<= 620px`, `<= 430px`) and test with `?mock=1&sidebar=350`.
 - **HTML5 Drag-and-Drop**: Maintain native `draggable="true"` session dependency linking and Line merge drag-and-drop (relying on `"dragDropEnabled": false` in `src-tauri/tauri.conf.json`).
 - **Dual Theme & Locale (`zh` / `en`, `system` / `light` / `dark`)**: Every user-visible string belongs in `I18N.zh` and `I18N.en`; categorical Line hues map between `PALETTE` (Light) and `DARK_PALETTE` (Dark) via `resolveLineColor()`.
-- **Static Verification**: Run `npm run lint:ui` (`biome lint ui scripts && node --check ...`) after every edit.
+- **Static Verification**: Run `npm run lint:ui && npm run test:ui` (`biome lint ui scripts`, `node --check`, and offline UI contract tests) after every edit.
+
+---
+
+## 4. Local Preview & README Screenshot Regeneration
+
+Start the zero-backend static preview server (`npm run preview` → `http://127.0.0.1:4310/ui/`) and verify key surfaces before finalizing visual edits:
+
+- Week + dependency tree: `http://127.0.0.1:4310/ui/?mock=1&lang=en&theme=light&mode=week&expand=1&dep=1`
+- Day + inline `RECAP` card: `http://127.0.0.1:4310/ui/?mock=1&lang=en&theme=light&mode=day&day=4&hover=planar&recap=1`
+- Dark mode: append `&theme=dark`
+- Narrow sidebar (`350px`): append `&sidebar=350`
+- Settings slicer: `http://127.0.0.1:4310/ui/?mock=1&lang=en&theme=light&view=settings&tab=lines`
+
+Whenever major UI chrome changes, regenerate clean-room 2× Retina screenshots (`assets/ui-*.png`) from `?mock=1` using Headless Chrome (never capture real user transcripts):
+
+```bash
+PORT=4319 node ./scripts/preview.mjs >/tmp/planar-preview.log 2>&1 &
+PID=$!; trap "kill $PID 2>/dev/null || true" EXIT; sleep 0.5
+CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+"$CHROME" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=2 --window-size=920,760 --virtual-time-budget=3000 --screenshot="$PWD/assets/ui-week.png" "http://127.0.0.1:4319/ui/?mock=1&lang=en&theme=light&mode=week&expand=1&dep=1"
+"$CHROME" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=2 --window-size=920,960 --virtual-time-budget=3000 --screenshot="$PWD/assets/ui-day.png" "http://127.0.0.1:4319/ui/?mock=1&lang=en&theme=light&mode=day&day=4&hover=planar&recap=1"
+"$CHROME" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=2 --window-size=920,890 --virtual-time-budget=3000 --screenshot="$PWD/assets/ui-settings.png" "http://127.0.0.1:4319/ui/?mock=1&lang=en&theme=light&view=settings&tab=lines"
+rm -f /tmp/planar-preview.log
+```
+
+Inspect every captured PNG visually before committing.

@@ -206,13 +206,13 @@ def evaluate_hook_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
     if parse_err:
         return deny(
             f"Blocked `gh issue create`: {parse_err} "
-            "Follow `.agents/skills/planar-dev/references/issue-filing.md` and pass "
+            "Follow `WORKFLOW.md` and pass "
             "`--title` with `--body` or `--body-file <path>`."
         )
     if not title or body is None:
         return deny(
             "Blocked `gh issue create`: missing explicit `--title` and `--body`/`--body-file`. "
-            "Follow `.agents/skills/planar-dev/references/issue-filing.md` and record the draft "
+            "Follow `WORKFLOW.md` and record the draft "
             "marker with `python3 scripts/hooks/pre_tool_use_issue_guard.py --write-marker` first."
         )
 
@@ -221,7 +221,7 @@ def evaluate_hook_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
     if not marker_path.is_file():
         return deny(
             f"Blocked `gh issue create`: missing issue-filing marker at {marker_path}. "
-            "Follow `.agents/skills/planar-dev/references/issue-filing.md` and run "
+            "Follow `WORKFLOW.md` and run "
             "`python3 scripts/hooks/pre_tool_use_issue_guard.py --write-marker --title ... --body-file ...`."
         )
 

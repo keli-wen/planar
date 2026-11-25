@@ -1,6 +1,6 @@
-# Reference: Diff Simplifier (Occam's Razor Pass)
+# Diff Simplifier (`SIMPLIFY.md`)
 
-> Read-only post-review pass for removing unnecessary complexity before opening a PR. Goal: keep the smallest, clearest diff that satisfies the issue spec while preserving all tests and Planar invariants.
+> Independent post-review rubric (Occam's Razor pass) for removing unnecessary complexity before opening a PR. Goal: keep the smallest, clearest diff that satisfies the issue spec while preserving all tests and Planar invariants.
 
 ## North Star
 
@@ -26,9 +26,9 @@
 
 Never recommend removing or weakening:
 
-- **Core Invariants (`AGENTS.md` #1–#7)**: read-only harness logs, `[PLANAR_INTERNAL_DIGEST]` stripping, pinned Line immutability, unpadded `activity_intervals`, SQLite WAL/FK PRAGMAs, `"dragDropEnabled": false`, clean-room hygiene.
+- **Core Invariants ([`AGENTS.md`](AGENTS.md) #1–#7)**: read-only harness logs, `[PLANAR_INTERNAL_DIGEST]` stripping, pinned Line immutability, unpadded `activity_intervals`, SQLite WAL/FK PRAGMAs, `"dragDropEnabled": false`, clean-room hygiene.
 - **Rust Safety & Error Context**: `unsafe_code = "forbid"`, `unwrap_used = "deny"`, meaningful `PlanarError` messages, and regression tests guarding real failure modes.
-- **Zero-Fork `./ui` Parity**: `DESIGN.md` Light/Dark tokens, `zh`/`en` `I18N` parity, narrow `320px` sidebar, and `?mock=1` preview compatibility.
+- **Zero-Fork `./ui` Parity**: [`DESIGN.md`](DESIGN.md) Light/Dark tokens, `zh`/`en` `I18N` parity, narrow `320px` sidebar, and `?mock=1` preview compatibility.
 
 ## Output Rules
 
