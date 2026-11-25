@@ -4,5 +4,9 @@ set -eu
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# Strip Git hook environment variables (especially GIT_DIR in linked worktrees)
+# so nested git commands inside tests (e.g. `npm run test:hooks`) stay isolated.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
+
 echo "[planar pre-push] Running full local verification gate (npm run verify)..."
 npm run verify
