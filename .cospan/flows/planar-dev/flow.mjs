@@ -1,7 +1,7 @@
-import { execFileSync } from 'node:child_process';
 import { agent, refine } from 'cospan/flow';
 import devPrompt from './dev.md';
 import prPrompt from './pr.md';
+import { attachPrTrace } from './pr-trace-tool.mjs';
 
 const coderAgent = agent('agy/gemini-4-neon', { effort: 'xhigh', role: 'coder' });
 const codeReviewer = agent('codex/gpt-6.2-sol', {
@@ -14,25 +14,6 @@ const diffSimplifier = agent('agy/gemini-4-neon', {
   readonly: true,
   role: 'simplifier',
 });
-
-function attachPrTrace(cwd, trace) {
-  if (!trace?.upsertIn) return;
-  try {
-    const prJson = execFileSync('gh', ['pr', 'view', '--json', 'number,body'], {
-      cwd,
-      encoding: 'utf8',
-    });
-    const { number, body = '' } = JSON.parse(prJson);
-    if (!number) return;
-    execFileSync('gh', ['pr', 'edit', String(number), '--body-file', '-'], {
-      cwd,
-      input: `${trace.upsertIn(body)}\n`,
-      stdio: ['pipe', 'ignore', 'ignore'],
-    });
-  } catch {
-    // Best-effort telemetry: never fail a completed PR over trace attachment.
-  }
-}
 
 export default async ({ prompt: issuePrompt, cwd, trace }) => {
   let coderSession = await coderAgent.run(`${devPrompt}\n\n## Task\n${issuePrompt}`, {
